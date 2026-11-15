@@ -1,0 +1,17 @@
+name = "memeos-v1"
+main = "worker/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[vars]
+APP_ENV = "production"
+SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+META_GRAPH_VERSION = "v21.0"
+
+[triggers]
+crons = ["*/15 * * * *"]
