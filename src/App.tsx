@@ -6,7 +6,7 @@ import {
   LogOut, Menu, Moon, Plus, Search, Settings, ShieldCheck, Sun, Users,
   Workflow, X
 } from "lucide-react";
-import { supabase } from "./lib/supabase";
+import { initializeSupabase, supabase } from "./lib/supabase";
 import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login } from "./pages";
 
 const nav = [
@@ -20,7 +20,8 @@ const nav = [
 
 export default function App() {
   const [session, setSession] = useState<any>(null);
-  const [ready, setReady] = useState(!supabase);
+  const [ready, setReady] = useState(false);
+  const [configured, setConfigured] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem("memeos-theme") || "dark");
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -32,14 +33,36 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (!supabase) return;
-    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
-    const { data } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
-    return () => data.subscription.unsubscribe();
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+
+    initializeSupabase().then(async (client) => {
+      if (!active) return;
+      setConfigured(!!client);
+      if (!client) {
+        setReady(true);
+        return;
+      }
+      const { data } = await client.auth.getSession();
+      if (!active) return;
+      setSession(data.session);
+      const listener = client.auth.onAuthStateChange((_event, nextSession) => {
+        if (active) setSession(nextSession);
+      });
+      unsubscribe = () => listener.data.subscription.unsubscribe();
+      setReady(true);
+    }).catch(() => {
+      if (active) { setConfigured(false); setReady(true); }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
   }, []);
 
   if (!ready) return <div className="boot">MEMEOS <span>Loading workspace…</span></div>;
-  if (!session) return <Login configured={!!supabase} />;
+  if (!session) return <Login configured={configured} />;
 
   const logout = async () => { await supabase?.auth.signOut(); navigate("/"); };
 

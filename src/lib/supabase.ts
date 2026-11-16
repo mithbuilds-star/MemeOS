@@ -1,7 +1,11 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-// Vite variables are optional fallbacks. The preferred deployment path is
-// runtime config from the Worker so direct Dashboard uploads work too.
+// Runtime configuration is loaded from the Worker before the React app
+// mounts. This avoids top-level await, which is unsupported by Vite's
+// default browser build targets.
+export let supabase: SupabaseClient | null = null;
+let initialization: Promise<SupabaseClient | null> | null = null;
+
 async function loadSupabaseConfig(): Promise<{ url: string; publishableKey: string }> {
   const buildUrl = import.meta.env.VITE_SUPABASE_URL || "";
   const buildKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "";
@@ -20,15 +24,21 @@ async function loadSupabaseConfig(): Promise<{ url: string; publishableKey: stri
   }
 }
 
-const config = await loadSupabaseConfig();
-const url = config.url;
-const publishableKey = config.publishableKey;
+export function initializeSupabase(): Promise<SupabaseClient | null> {
+  if (!initialization) {
+    initialization = loadSupabaseConfig().then(({ url, publishableKey }) => {
+      if (url && publishableKey) {
+        supabase = createClient(url, publishableKey, {
+          auth: { persistSession: true, autoRefreshToken: true },
+        });
+      }
+      return supabase;
+    });
+  }
+  return initialization;
+}
 
-export const supabase = url && publishableKey
-  ? createClient(url, publishableKey, { auth: { persistSession: true, autoRefreshToken: true } })
-  : null;
-
-export function requireSupabase() {
+export function requireSupabase(): SupabaseClient {
   if (!supabase) throw new Error("Supabase is not configured. Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY as Cloudflare Worker runtime variables.");
   return supabase;
 }
