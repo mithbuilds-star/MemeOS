@@ -135,8 +135,8 @@ async function main() {
   requireEnv();
   const text = env.TEXT.trim();
   const freeze = Math.max(0, Math.min(5, Number(env.FREEZE_SECONDS || 2)));
-  const audioUrl = await signSongUrl(songId);
   const songId = env.SONG_ID || null;
+  const audioUrl = await signSongUrl(songId);
   const dir = await mkdtemp(path.join(tmpdir(), 'memeos-'));
   try {
     const source = path.join(dir, 'bratext-source.mp4');
