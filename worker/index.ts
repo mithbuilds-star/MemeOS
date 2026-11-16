@@ -525,6 +525,63 @@ async function runScheduledDiscovery(env:Env){
   }
 }
 
+// Instagram Login callback: validates single-use state, exchanges the code, stores the encrypted long-lived token.
+async function metaCallback(req: Request, env: Env, url: URL): Promise<Response> {
+  const back = (qs: string) => Response.redirect(`${url.origin}/accounts?${qs}`, 302);
+  const err = url.searchParams.get("error_description") || url.searchParams.get("error");
+  if (err) return back(`ig_error=${encodeURIComponent("Instagram did not grant access: " + err)}`);
+  const code = (url.searchParams.get("code") || "").replace(/#_$/, "");
+  const state = url.searchParams.get("state") || "";
+  if (!code || !state) return back(`ig_error=${encodeURIComponent("The Instagram response was incomplete. Try connecting again.")}`);
+  // Single use: deleting the row is the check. Expired or unknown states are rejected.
+  const rows: any[] = await db(env, "meta_oauth_states", `?state=eq.${encodeURIComponent(state)}&select=*`, { method: "DELETE" });
+  const st = rows?.[0];
+  if (!st || new Date(st.expires_at).getTime() < Date.now()) return back(`ig_error=${encodeURIComponent("This connection link expired or was already used. Click Connect again.")}`);
+  try {
+    const form = new URLSearchParams({ client_id: env.META_APP_ID || "", client_secret: env.META_APP_SECRET || "", grant_type: "authorization_code", redirect_uri: env.META_REDIRECT_URI || "", code });
+    const shortRes = await fetch("https://api.instagram.com/oauth/access_token", { method: "POST", body: form });
+    const short: any = await shortRes.json().catch(() => ({}));
+    if (!shortRes.ok || !short.access_token) throw new Error(short.error_message || short.error?.message || "The code was rejected (it may have expired).");
+    const longRes = await fetch(`https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${encodeURIComponent(env.META_APP_SECRET || "")}&access_token=${encodeURIComponent(short.access_token)}`);
+    const long: any = await longRes.json().catch(() => ({}));
+    if (!longRes.ok || !long.access_token) throw new Error(long.error?.message || "Could not get a long-lived token.");
+    const ver = env.META_GRAPH_VERSION || "v27.0";
+    const meRes = await fetch(`https://graph.instagram.com/${ver}/me?fields=user_id,username,account_type,profile_picture_url&access_token=${encodeURIComponent(long.access_token)}`);
+    const me: any = await meRes.json().catch(() => ({}));
+    if (!meRes.ok || !me.username) throw new Error(me.error?.message || "Could not read the Instagram account.");
+    const enc = await encryptSecret(env, long.access_token);
+    const expiresAt = new Date(Date.now() + Number(long.expires_in || 5184000) * 1000).toISOString();
+    await db(env, "instagram_accounts", `?id=eq.${st.destination_account_id}&owner_id=eq.${st.owner_id}`, { method: "PATCH", body: JSON.stringify({
+      username: me.username, meta_user_id: String(me.user_id || short.user_id || ""), profile_picture_url: me.profile_picture_url || null,
+      meta_access_token_enc: enc.encrypted_secret, meta_access_token_iv: enc.encryption_iv, meta_token_expires_at: expiresAt,
+      meta_token_refreshed_at: new Date().toISOString(), meta_token_refresh_error: null, connection_status: "connected" }) });
+    return back("ig_connected=1");
+  } catch (e: any) {
+    await db(env, "instagram_accounts", `?id=eq.${st.destination_account_id}&owner_id=eq.${st.owner_id}`, { method: "PATCH", body: JSON.stringify({ connection_status: "error", meta_token_refresh_error: String(e?.message || e).slice(0, 300) }) }).catch(() => {});
+    return back(`ig_error=${encodeURIComponent(String(e?.message || e))}`);
+  }
+}
+
+// Refreshes long-lived tokens that are close to expiry. Only refreshes tokens that are still valid.
+async function refreshInstagramTokens(env: Env) {
+  const soon = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
+  const rows: any[] = await db(env, "instagram_accounts", `?meta_access_token_enc=not.is.null&meta_token_expires_at=lte.${encodeURIComponent(soon)}&select=*&limit=20`);
+  for (const acc of rows) {
+    try {
+      const token = await decryptSecret(env, { encrypted_secret: acc.meta_access_token_enc, encryption_iv: acc.meta_access_token_iv });
+      if (new Date(acc.meta_token_expires_at).getTime() < Date.now()) throw new Error("The token has expired. Reconnect this account.");
+      const res = await fetch(`https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(token)}`);
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok || !data.access_token) throw new Error(data.error?.message || "Refresh was refused. Reconnect this account.");
+      const enc = await encryptSecret(env, data.access_token);
+      await db(env, "instagram_accounts", `?id=eq.${acc.id}`, { method: "PATCH", body: JSON.stringify({ meta_access_token_enc: enc.encrypted_secret, meta_access_token_iv: enc.encryption_iv, meta_token_expires_at: new Date(Date.now() + Number(data.expires_in || 5184000) * 1000).toISOString(), meta_token_refreshed_at: new Date().toISOString(), meta_token_refresh_error: null }) });
+    } catch (e: any) {
+      // Never overwrite a working token with a failed result; just record the reason.
+      await db(env, "instagram_accounts", `?id=eq.${acc.id}`, { method: "PATCH", body: JSON.stringify({ meta_token_refresh_error: String(e?.message || e).slice(0, 300) }) }).catch(() => {});
+    }
+  }
+}
+
 async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Response> {
   const p = url.pathname.replace(/^\/api/, "");
   const method = req.method;
@@ -552,8 +609,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!env.META_APP_ID||!env.META_REDIRECT_URI)return fail("Meta app credentials and callback URL are not configured in the Worker.",503);
     if(!await owned(env,"instagram_accounts",metaConnect[1],ctx))return fail("Account not found.",404);
     const state=crypto.randomUUID();await db(env,"meta_oauth_states","",{method:"POST",body:JSON.stringify({state,owner_id:ctx.userId,destination_account_id:metaConnect[1],expires_at:new Date(Date.now()+10*60*1000).toISOString()})});
-    const scope="pages_show_list,pages_read_engagement,instagram_basic,instagram_content_publish,instagram_manage_insights";
-    const target=`https://www.facebook.com/${env.META_GRAPH_VERSION||"v27.0"}/dialog/oauth?client_id=${encodeURIComponent(env.META_APP_ID)}&redirect_uri=${encodeURIComponent(env.META_REDIRECT_URI)}&state=${encodeURIComponent(state)}&response_type=code&scope=${encodeURIComponent(scope)}`;
+    const scope="instagram_business_basic,instagram_business_content_publish,instagram_business_manage_comments,instagram_business_manage_messages";
+    const target=`https://www.instagram.com/oauth/authorize?client_id=${encodeURIComponent(env.META_APP_ID)}&redirect_uri=${encodeURIComponent(env.META_REDIRECT_URI)}&state=${encodeURIComponent(state)}&response_type=code&scope=${encodeURIComponent(scope)}`;
     return json({authorization_url:target});
   }
   const accountMatch = p.match(/^\/accounts\/([0-9a-f-]+)$/);
@@ -961,6 +1018,7 @@ export default {
       }
     }
     try{await runScheduledDiscovery(env);}catch(e:any){console.error("Scheduled discovery phase failed",String(e?.message||e));}
+    try{await refreshInstagramTokens(env);}catch(e:any){console.error("Token refresh phase failed",String(e?.message||e));}
     try{await runBackgroundProcessing(env);}catch(e:any){console.error("Background processing phase failed",String(e?.message||e));}
     try{await runWaitingReels(env);}catch(e:any){console.error("Reel rendering phase failed",String(e?.message||e));}
     try{const analyticsOwners=await db(env,"user_settings","?select=owner_id,last_analytics_sync_at,global_paused");
