@@ -145,7 +145,7 @@ async function main() {
     if (audioPath) args.push('-stream_loop', '-1', '-i', audioPath);
     args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},scale=${W}:${H}:flags=lanczos,format=yuv420p`, '-map', '0:v:0');
     if (audioPath) args.push('-map', '1:a:0');
-    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '14', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
     if (audioPath) args.push('-c:a', 'aac', '-b:a', '160k', '-shortest');
     args.push(finalVideo);
     await run(args);
@@ -160,7 +160,7 @@ async function main() {
     if (c.mode === 'box') {
       const P = Math.max(Math.abs(c.dx), Math.abs(c.dy));
       const hex = c.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
-      const vf = `crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${c.w + 2 * P}:${c.h + 2 * P}:${P + c.dx}:${P + c.dy}:color=0x${hex},crop=${c.w}:${c.h}:${P}:${P},scale=${W}:${H}:flags=lanczos,format=rgb24`;
+      const vf = `crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${c.w + 2 * P}:${c.h + 2 * P}:${P + c.dx}:${P + c.dy}:color=0x${hex},crop=${c.w}:${c.h}:${P}:${P},format=rgb24`; // native box size, no upscaling (keeps the text sharp)
       await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', vf, '-frames:v', '1', poster]);
     } else {
       await copyFile(finalFrame, poster);
