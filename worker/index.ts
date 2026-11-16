@@ -263,7 +263,7 @@ async function processMemeInBackground(env:Env,meme:any){
     if(!text)throw new Error("Cannot generate BRAT assets without extracted text.");
     let reel:any;
     try{reel=await renderReelForMeme(env,{...current,owner_id:ctx.userId,extracted_text:text});}
-    catch(e:any){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:new Date(Date.now()+15*60*1000).toISOString(),processing_error:String(e?.message||e).slice(0,500),processing_locked_until:null,processing_next_retry_at:new Date(Date.now()+15*60*1000).toISOString()})});return {status:"render_failed"};}
+    catch(e:any){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:null,processing_error:String(e?.message||e).slice(0,500),processing_locked_until:null,processing_next_retry_at:new Date(Date.now()+15*60*1000).toISOString()})});return {status:"render_failed"};}
     if(reel.status==="dispatched"||reel.status==="rendering_on_github"){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_locked_until:null})});return {status:"rendering_on_github"};}
     if(reel.status==="renderer_not_configured"){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_locked_until:null})});return {status:"waiting_for_renderer"};}
     const rows=await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({source_asset_path:current.source_asset_path||current.asset_path,source_asset_url:current.source_asset_url||current.asset_url,processing_status:"generated",processing_error:null,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null})});
@@ -302,7 +302,11 @@ async function runBackgroundProcessing(env:Env){
 
 async function runWaitingReels(env:Env){
   const now=new Date().toISOString();
-  const pending=await db(env,"memes",`?reel_status=in.(waiting_for_song,renderer_not_configured,render_failed,rendering)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(now)})&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status&order=created_at.asc&limit=10`);
+  await db(env,"memes",`?reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(now)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:"The GitHub render did not report back within 30 minutes. Press Retry to render again."})});
+  const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status&order=created_at.asc&limit=10";
+  const auto=await db(env,"memes",`?reel_status=in.(waiting_for_song,renderer_not_configured)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(now)})${sel}`);
+  const manual=await db(env,"memes",`?reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(now)}${sel}`);
+  const pending=[...auto,...manual].slice(0,10);
   for(const meme of pending){
     const ctx:Ctx={userId:meme.owner_id,token:""};
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
@@ -319,7 +323,7 @@ async function runWaitingReels(env:Env){
       }
       await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});
     }catch(e:any){
-      await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:new Date(Date.now()+15*60*1000).toISOString(),reel_render_locked_until:null,processing_error:String(e?.message||e).slice(0,500),processing_next_retry_at:new Date(Date.now()+15*60*1000).toISOString()})});
+      await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:String(e?.message||e).slice(0,500),processing_next_retry_at:new Date(Date.now()+15*60*1000).toISOString()})});
     }
   }
 }
@@ -621,7 +625,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{ method: "PATCH", body: JSON.stringify({ ...reset, processing_status: g.status }) });
       requeued += rows.length;
     }
-    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: null, processing_error: null }) });
+    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: new Date().toISOString(), processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
   }
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}
