@@ -66,7 +66,19 @@ async function centreOffset(frame) {
     return mxX < 0 ? null : { x: mnX, y: mnY, w: mxX - mnX + 1, h: mxY - mnY + 1 };
   };
   // 1) The BRAT box: anything that differs from the outer background (the corner colour).
-  const outer = bbox(0, 0, W - 1, H - 1, raw[0], raw[1], raw[2]);
+  // Outer colour: the most common colour along the frame's edges (robust to a single odd corner pixel).
+  const counts = new Map();
+  const edge = (x, y) => {
+    const i = (y * W + x) * 3;
+    const key = `${raw[i] >> 3},${raw[i + 1] >> 3},${raw[i + 2] >> 3}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  };
+  for (let x = 0; x < W; x += 4) { edge(x, 0); edge(x, H - 1); }
+  for (let y = 0; y < H; y += 4) { edge(0, y); edge(W - 1, y); }
+  const [key] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  const [qr, qg, qb] = key.split(',').map((v) => Number(v) * 8 + 4);
+  const outer = bbox(0, 0, W - 1, H - 1, qr, qg, qb);
+  console.log('Centre outer', { edgeColour: [qr, qg, qb], bbox: outer });
   if (!outer) return { mode: 'none' };
   if (outer.w * outer.h < W * H * 0.5) return { mode: 'none' };
   // 2) The text inside the box: sample the box colour inside its border, then measure what differs from it.
