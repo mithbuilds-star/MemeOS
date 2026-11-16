@@ -21,8 +21,11 @@ const fail = (message: string, status = 400) => json({ error: message }, status)
 const headers = (env: Env) => ({ apikey: env.SUPABASE_SECRET_KEY, "Content-Type": "application/json" });
 async function auth(req: Request, env: Env): Promise<Ctx | null> {
   const token = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "");
-  if (!token || !env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY) return null;
-  const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: env.SUPABASE_SECRET_KEY, Authorization: `Bearer ${token}` } });
+  // Auth user validation must use the public/publishable API key. The secret key
+  // is reserved for server-side database/storage operations and is not the Auth
+  // API client key.
+  if (!token || !env.SUPABASE_URL || !env.SUPABASE_PUBLISHABLE_KEY) return null;
+  const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${token}` } });
   if (!r.ok) return null;
   const u: any = await r.json();
   return u?.id ? { userId: u.id, token } : null;

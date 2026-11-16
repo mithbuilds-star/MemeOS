@@ -64,7 +64,16 @@ export default function App() {
   if (!ready) return <div className="boot">MEMEOS <span>Loading workspace…</span></div>;
   if (!session) return <Login configured={configured} />;
 
-  const logout = async () => { await supabase?.auth.signOut(); navigate("/"); };
+  const logout = async () => {
+    // Clear the local session immediately so a failed network sign-out cannot
+    // trap the user in an authenticated-looking workspace.
+    setSession(null);
+    try {
+      await supabase?.auth.signOut({ scope: "local" });
+    } finally {
+      navigate("/", { replace: true });
+    }
+  };
 
   return <div className={`app-shell ${collapsed ? "collapsed" : ""}`}>
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
