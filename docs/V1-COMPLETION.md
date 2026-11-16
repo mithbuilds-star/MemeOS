@@ -8,7 +8,7 @@ This archive is the V1.5 source-complete candidate. It contains the V1 product w
 - Per-destination discovery toggles, source mapping, multiple parent links, cycle protection and transitive inheritance.
 - In-app multi-key Apify/Groq API Manager. Keys are encrypted server-side, never returned to the browser, and provider 429 responses trigger a cooldown before reuse.
 - Per-key Apify Actor ID and JSON input, including `{{usernames}}`, `{{profile_urls}}`, and `{{start_urls}}` placeholders.
-- Recurring discovery and persistent Apify run polling through the five-minute Worker Cron Trigger.
+- Recurring discovery and persistent Apify run polling through the every-minute Worker Cron Trigger.
 - Server-side Workers AI OCR, Groq text-only suitability classification, editable extracted text and manual-review handling.
 - BRAT progressive MP4 generation through `brat-canvas/video`; the final-frame photo PNG is derived from the completed MP4 and fitted into a 4:5 canvas without cropping the text content.
 - Song library upload, preview, enable/disable/delete, least-used-biased random selection and audio mixing into Reels.
