@@ -56,7 +56,7 @@ The Worker serves the built React app and `/api/*` endpoints. It uses Supabase f
 1. Install dependencies: `npm install`.
 2. Create a Supabase project.
 3. In Supabase SQL Editor, run all seven migrations in order (see Database migrations above).
-4. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+4. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
 5. Start the frontend with `npm run dev`.
 6. Create an account using the sign-up link on the login screen.
 
@@ -65,7 +65,7 @@ The Worker serves the built React app and `/api/*` endpoints. It uses Supabase f
 Set the following infrastructure secrets once:
 
 ```bash
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx wrangler secret put SUPABASE_SECRET_KEY
 npx wrangler secret put CREDENTIALS_ENCRYPTION_KEY
 ```
 
@@ -90,7 +90,7 @@ For local Worker testing, create `.dev.vars` (never commit it):
 
 ```env
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+SUPABASE_SECRET_KEY=YOUR_SUPABASE_SECRET_KEY
 CREDENTIALS_ENCRYPTION_KEY=YOUR_BASE64_32_BYTE_KEY
 ```
 
@@ -107,15 +107,27 @@ After signing into MemeOS, open **Settings → API Manager**.
 - Apify discovery tries enabled keys in least-recently-used order and moves on after errors/rate limits. Each key can store its own actor ID and actor input JSON.
 - Multiple keys do not necessarily mean multiple quotas: keys belonging to the same provider account/organization may share quota.
 
-Only the encryption key and Supabase service-role key remain Worker secrets. Individual Apify and Groq keys are entered inside the logged-in MemeOS app, not in Cloudflare settings.
+Only the encryption key and Supabase secret key remain Worker secrets. Individual Apify and Groq keys are entered inside the logged-in MemeOS app, not in Cloudflare settings.
+
+## Supabase API keys (current key format)
+
+This project uses Supabase's current **publishable** and **secret** API keys. Do not use the legacy `anon` or `service_role` JWT keys. Supabase is deprecating those legacy keys; the current keys are `sb_publishable_...` for browser code and `sb_secret_...` for the Worker.
+
+- Frontend build variable: `VITE_SUPABASE_PUBLISHABLE_KEY` (publishable key only).
+- Cloudflare Worker secret: `SUPABASE_SECRET_KEY` (secret key only).
+- Worker REST and Storage requests send the secret key in the `apikey` header only. It is not a JWT and must not be copied into `Authorization: Bearer`.
+- When validating a signed-in user, the Worker sends the secret key in `apikey` and the user's Supabase access token in `Authorization: Bearer`.
+- The secret key bypasses RLS. Keep it exclusively in Cloudflare Worker secrets.
+
+See the official [Supabase migration guide](https://supabase.com/docs/guides/getting-started/migrating-to-new-api-keys).
 
 ## Supabase configuration
 
 - Enable email/password authentication.
 - Configure the site URL and allowed redirect URLs.
 - Ensure the `meme-assets` bucket exists (migration 0001 creates it).
-- Keep the service-role key exclusively in Cloudflare Worker secrets.
-- Never put the service-role key or provider API keys in a `VITE_` variable.
+- Keep the secret key exclusively in Cloudflare Worker secrets.
+- Never put the secret key or provider API keys in a `VITE_` variable.
 
 ## Current API routes
 
@@ -144,14 +156,14 @@ Only the encryption key and Supabase service-role key remain Worker secrets. Ind
 - `GET /api/health`
 - `PATCH /api/settings`
 
-All API routes require a valid Supabase access token. The Worker validates the user token and applies the owner filter to all credential operations. Database access uses the service role only on the backend.
+All API routes require a valid Supabase access token. The Worker validates the user token and applies the owner filter to all credential operations. Database access uses the secret-key role only on the backend.
 
 ## Deployment from GitHub
 
 1. Push this repository to GitHub.
 2. Connect the repository to Cloudflare Workers Builds or deploy with Wrangler.
 3. Set the two infrastructure secrets above.
-4. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as build environment variables.
+4. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` as build environment variables.
 5. Apply all seven Supabase migrations in order.
 6. Deploy. Then sign in and add provider keys in Settings → API Manager.
 

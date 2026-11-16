@@ -12,6 +12,7 @@ not_found_handling = "single-page-application"
 APP_ENV = "production"
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
 META_GRAPH_VERSION = "v27.0"
+# Set RENDER_SERVICE_URL as a Worker runtime variable after deploying render-service.
 
 [triggers]
 crons = ["*/5 * * * *"]

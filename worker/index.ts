@@ -1,7 +1,7 @@
 export interface Env {
   ASSETS: Fetcher;
   SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
+  SUPABASE_SECRET_KEY: string;
   CREDENTIALS_ENCRYPTION_KEY?: string;
   META_APP_ID?: string;
   META_APP_SECRET?: string;
@@ -15,11 +15,13 @@ export interface Env {
 type Ctx = { userId: string; token: string };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 const fail = (message: string, status = 400) => json({ error: message }, status);
-const headers = (env: Env) => ({ apikey: env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`, "Content-Type": "application/json" });
+// Supabase publishable/secret API keys are not JWTs. Send the secret key only in apikey;
+// do not put it in Authorization: Bearer. Supabase API Gateway derives the service role.
+const headers = (env: Env) => ({ apikey: env.SUPABASE_SECRET_KEY, "Content-Type": "application/json" });
 async function auth(req: Request, env: Env): Promise<Ctx | null> {
   const token = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "");
-  if (!token || !env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return null;
-  const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${token}` } });
+  if (!token || !env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY) return null;
+  const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: env.SUPABASE_SECRET_KEY, Authorization: `Bearer ${token}` } });
   if (!r.ok) return null;
   const u: any = await r.json();
   return u?.id ? { userId: u.id, token } : null;
