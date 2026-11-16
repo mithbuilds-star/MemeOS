@@ -187,7 +187,7 @@ export function Pipeline() {
   const [data,setData]=useState<any>(null);const [error,setError]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState("");
   const load=()=>{api("/pipeline").then(setData).catch(e=>setError(e.message))};
   useEffect(()=>{load();const t=setInterval(load,15000);return ()=>clearInterval(t)},[]);
-  const retryAll=async()=>{setBusy("all");setMessage("");try{const r=await api("/pipeline/retry",{method:"POST",body:"{}"});setMessage(`Requeued ${r.requeued} item(s) and ${r.reel_requeued} reel render(s). They run on the next cron tick.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
+  const retryAll=async()=>{setBusy("all");setMessage("");try{const r=await api("/pipeline/retry",{method:"POST",body:"{}"});setMessage(r.requeued+r.reel_requeued===0?"Nothing to retry. Every unfinished item is waiting on something else, see the WHY column.":`Requeued ${r.requeued} item(s) and ${r.reel_requeued} reel render(s). They run on the next cron tick.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const retryOne=async(id:string)=>{setBusy(id);setMessage("");try{const r=await api(`/memes/${id}/process`,{method:"POST",body:"{}"});setMessage(`Queued ${id.slice(0,8)} at ${r.processing_status}.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const stages:any[]=data?.stages||[];const running:any[]=data?.running||[];const queued:any[]=data?.queued||[];
   const rendererOk=data?.renderer==="github_actions";

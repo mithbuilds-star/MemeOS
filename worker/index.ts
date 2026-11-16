@@ -613,7 +613,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{ method: "PATCH", body: JSON.stringify({ ...reset, processing_status: g.status }) });
       requeued += rows.length;
     }
-    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_render_locked_until: null, reel_render_next_retry_at: null, processing_error: null }) });
+    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: null, processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
   }
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}
