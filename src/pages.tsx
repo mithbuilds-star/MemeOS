@@ -101,7 +101,7 @@ export function Library() {
   const [filter,setFilter]=useState<"all"|"discovered"|"generated">("all");
   const [busy,setBusy]=useState("");const [message,setMessage]=useState("");
   const isGenerated=(m:any)=>!!m.asset_url||m.processing_status==="generated"||m.source_type==="manual";
-  const isDiscovered=(m:any)=>m.source_type==="discovery";
+  const isDiscovered=(m:any)=>!isGenerated(m);
   const shown=memes.filter((m:any)=>filter==="all"||(filter==="discovered"?isDiscovered(m):isGenerated(m)));
   const reject=async(m:any)=>{setBusy(m.id);setMessage("");try{await api(`/memes/${m.id}/reject`,{method:"POST",body:"{}"});setMessage("Rejected. It will no longer appear in the approval queue.");load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const retry=async(m:any)=>{setBusy(m.id);setMessage("");try{const r=await api(`/memes/${m.id}/process`,{method:"POST",body:"{}"});setMessage(`Retry queued (${r.processing_status}).`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
