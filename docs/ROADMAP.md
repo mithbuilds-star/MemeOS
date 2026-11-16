@@ -14,7 +14,7 @@
 - Native photo publishing and scheduling foundations.
 
 ## V1.3 — unattended processing
-- Cloudflare Worker Cron Trigger processes discovery polling, OCR, classification and asset generation every five minutes.
+- Cloudflare Worker Cron Trigger processes discovery polling, OCR, classification and asset generation every minute.
 - Persistent processing locks, retries, error state and manual requeue.
 - Recurring discovery is configurable from 15 minutes to 24 hours. Closing the browser or signing out does not stop backend processing.
 - Approval remains manual; publishing requires an approved assignment and configured Meta integration.

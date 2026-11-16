@@ -224,7 +224,7 @@ export function Pipeline() {
       {running.length===0?<Empty title="Nothing running" text="No item is being processed right now."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STEP</th><th>ATTEMPTS</th></tr></thead><tbody>{running.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"").slice(0,60)}</small></td><td>{m.step}</td><td>{m.processing_attempts??0}</td></tr>)}</tbody></table></div>}
     </div>
     <div className="panel" style={{marginTop:18}}>
-      <div className="panel-head"><div><h3>Queued</h3><p>Waiting for the next cron tick (about every 5 minutes).</p></div><span className="tag">{queued.length} QUEUED</span></div>
+      <div className="panel-head"><div><h3>Queued</h3><p>Waiting for the next cron tick (runs every minute).</p></div><span className="tag">{queued.length} QUEUED</span></div>
       {queued.length===0?<Empty title="Queue is empty" text="Nothing is waiting to be processed."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>NEXT STEP</th></tr></thead><tbody>{queued.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,60)}</small></td><td>{m.step}</td></tr>)}</tbody></table></div>}
     </div>
     <div className="panel" style={{marginTop:18}}>

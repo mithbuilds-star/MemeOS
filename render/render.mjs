@@ -79,6 +79,24 @@ async function centreOffset(frame) {
   return { mode: 'box', ...box, dx, dy };
 }
 
+// The render job signs the song itself with its server-side key, so no signed URL is passed through workflow inputs.
+async function signSongUrl(songId) {
+  if (!songId) return '';
+  const rows = await fetch(`${SUPABASE_URL}/rest/v1/song_library?id=eq.${encodeURIComponent(songId)}&select=storage_path`, {
+    headers: { apikey: KEY, Authorization: `Bearer ${KEY}` },
+  }).then((r) => r.json());
+  const storagePath = rows?.[0]?.storage_path;
+  if (!storagePath) throw new Error('Selected song was not found.');
+  const r = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/song-library/${storagePath}`, {
+    method: 'POST',
+    headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expiresIn: 600 }),
+  });
+  const data = await r.json();
+  if (!r.ok || !data.signedURL) throw new Error(`Could not sign the selected song (${r.status}).`);
+  return `${SUPABASE_URL}/storage/v1${data.signedURL}`;
+}
+
 async function patchMeme(patch) {
   const url = `${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}`;
   const r = await fetch(url, {
@@ -112,7 +130,7 @@ async function main() {
   requireEnv();
   const text = env.TEXT.trim();
   const freeze = Math.max(0, Math.min(5, Number(env.FREEZE_SECONDS || 2)));
-  const audioUrl = env.AUDIO_URL || '';
+  const audioUrl = await signSongUrl(songId);
   const songId = env.SONG_ID || null;
   const dir = await mkdtemp(path.join(tmpdir(), 'memeos-'));
   try {

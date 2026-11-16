@@ -42,7 +42,7 @@ npm run build
 npx wrangler deploy
 ```
 If Cloudflare Workers Builds is connected to this repo, a push to `main` deploys automatically.
-Cloudflare's Cron Trigger (`*/5 * * * *`) runs the background work every five minutes.
+Cloudflare's Cron Trigger (`* * * * *`) runs the background work every minute.
 
 ## 3. GitHub Actions renderer
 1. **Repo must be public** (or have Actions minutes). Public repos get free standard runners (7 GB RAM).

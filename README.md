@@ -15,8 +15,8 @@ This is a deployable source-code build, not a pre-connected hosted service. Exte
 - In-app API Manager for multiple Apify and Groq keys, encrypted with AES-GCM; keys are never returned to the browser.
 - Apify run initiation with enabled-key fallback, configurable per-key actor JSON input, dynamic source-user placeholders, run polling, dataset retrieval, flexible output normalization, duplicate detection, image download to Supabase Storage, and job history.
 - Destination accounts, reference sources, account-specific source mappings, independent discovery toggles, multiple parent relationships, cycle prevention, and inheritance propagation for newly discovered items.
-- Unattended backend OCR through Cloudflare Workers AI, Groq text-only classification using the in-app multi-key manager, and server-side BRAT MP4 rendering with the generated final frame extracted as the photo PNG. The scheduled Worker runs every five minutes; closing the dashboard does not stop processing.
-- Central meme library, approval actions, per-account assignment API, recurring discovery (configurable from 15 minutes to 24 hours), scheduling CRUD, and persistent five-minute Worker cron execution.
+- Unattended backend OCR through Cloudflare Workers AI, Groq text-only classification using the in-app multi-key manager, and server-side BRAT MP4 rendering with the generated final frame extracted as the photo PNG. The scheduled Worker runs every minute; closing the dashboard does not stop processing.
+- Central meme library, approval actions, per-account assignment API, recurring discovery (configurable from 15 minutes to 24 hours), scheduling CRUD, and persistent every-minute Worker cron execution.
 - Meta Facebook Login OAuth callback, encrypted Page-token storage, destination connection status, and scheduled native-photo publishing through the Graph API.
 - Publishing history, Meta media metrics synchronization where the connected account/API returns them, analytics sync button and periodic sync, health view, global pause, automatic queue processing controls, publishing leases, bounded retries and ambiguous-publish protection.
 
@@ -84,7 +84,7 @@ npm run build
 npx wrangler deploy
 ```
 
-The Worker serves `dist/` at `/` and API endpoints at `/api/*`. Its Cron Trigger processes pending memes every five minutes even when no user has the dashboard open. The AI binding is configured in `wrangler.toml`; no OCR key is stored in the browser. Reel rendering is delegated to the separately deployed `render-service/` container.
+The Worker serves `dist/` at `/` and API endpoints at `/api/*`. Its Cron Trigger processes pending memes every minute even when no user has the dashboard open. The AI binding is configured in `wrangler.toml`; no OCR key is stored in the browser. Reel rendering is delegated to the separately deployed `render-service/` container.
 
 For local Worker testing, create `.dev.vars` (never commit it):
 
@@ -179,7 +179,7 @@ All API routes require a valid Supabase access token. The Worker validates the u
 ## V1.5 background processing and Reel behavior
 
 - Enable **Automatic content processing** in Settings (enabled by default).
-- The Cloudflare Worker Cron Trigger runs every five minutes. OCR, Groq classification and BRAT MP4/final-frame rendering run on the backend; the dashboard does not need to be open and the user does not need to stay signed in.
+- The Cloudflare Worker Cron Trigger runs every minute. OCR, Groq classification and BRAT MP4/final-frame rendering run on the backend; the dashboard does not need to be open and the user does not need to stay signed in.
 - OCR uses Cloudflare Workers AI Gemma 4 vision. The model does not provide a calibrated OCR confidence score in this workflow, so MemeOS does not invent one; extracted text is explicitly marked as unscored for human verification.
 - Candidates with no readable text are held for manual review. Groq only classifies text already extracted from the image and never rewrites the joke.
 - Processing locks, attempts, errors and retry times are persisted. Retries are bounded to five attempts with exponential backoff. A failed item can be requeued from the Approval Queue.

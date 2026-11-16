@@ -20,11 +20,6 @@ on:
         required: false
         default: "2"
         type: string
-      audio_url:
-        description: Signed song URL (optional)
-        required: false
-        default: ""
-        type: string
       song_id:
         description: Song id (optional)
         required: false
@@ -62,6 +57,5 @@ jobs:
           OWNER_ID: ${{ inputs.owner_id }}
           TEXT: ${{ inputs.text }}
           FREEZE_SECONDS: ${{ inputs.freeze_seconds }}
-          AUDIO_URL: ${{ inputs.audio_url }}
           SONG_ID: ${{ inputs.song_id }}
         run: node render.mjs
