@@ -1,6 +1,6 @@
 name = "memeos-v1"
 main = "worker/index.ts"
-compatibility_date = "2025-01-15"
+compatibility_date = "2026-11-16"
 compatibility_flags = ["nodejs_compat"]
 
 [assets]
@@ -11,7 +11,12 @@ not_found_handling = "single-page-application"
 [vars]
 APP_ENV = "production"
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
-META_GRAPH_VERSION = "v21.0"
+META_GRAPH_VERSION = "v27.0"
 
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/5 * * * *"]
+
+# Workers AI provides server-side image text extraction.
+[ai]
+binding = "AI"
+

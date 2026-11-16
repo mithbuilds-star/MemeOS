@@ -7,12 +7,12 @@ import {
   Workflow, X
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
-import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, Login } from "./pages";
+import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login } from "./pages";
 
 const nav = [
   ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users],
   ["Discovery", "/discovery", Compass], ["Approval Queue", "/queue", CheckCheck],
-  ["Content Library", "/library", Database], ["Meme Creator", "/creator", Clapperboard],
+  ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage], ["Meme Creator", "/creator", Clapperboard],
   ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow],
   ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity],
   ["Settings", "/settings", Settings]
@@ -66,7 +66,7 @@ export default function App() {
       <div className="page-wrap"><Routes>
         <Route path="/" element={<Overview/>}/><Route path="/accounts" element={<Accounts/>}/>
         <Route path="/discovery" element={<Discovery/>}/><Route path="/queue" element={<Queue/>}/>
-        <Route path="/library" element={<Library/>}/><Route path="/creator" element={<Creator/>}/>
+        <Route path="/library" element={<Library/>}/><Route path="/songs" element={<SongLibrary/>}/><Route path="/creator" element={<Creator/>}/>
         <Route path="/scheduler" element={<Scheduler/>}/><Route path="/publishing" element={<Publishing/>}/>
         <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/>
         <Route path="/settings" element={<SettingsPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/>

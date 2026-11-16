@@ -1,0 +1,11 @@
+{
+  "name": "memeos-render-service",
+  "private": true,
+  "version": "1.5.0",
+  "type": "module",
+  "scripts": {"start": "node server.mjs"},
+  "dependencies": {
+    "brat-canvas": "^1.0.30",
+    "ffmpeg-static": "^5.2.0"
+  }
+}
