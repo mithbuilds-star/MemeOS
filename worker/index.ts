@@ -213,6 +213,12 @@ async function signedSongUrl(env:Env,path:string){
 async function renderReelForMeme(env:Env,meme:any){
   const ctx:Ctx={userId:meme.owner_id,token:""};
   const nowMs=Date.now();
+  // Choose the output format once, at generation: about 30% Reels, 70% photo posts.
+  if(!meme.output_format){
+    const fmt=Math.random()<0.3?"reel":"photo";
+    await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:fmt})});
+    meme.output_format=fmt;
+  }
   // A render was already dispatched (or failed and is backing off): don't start another.
   if(meme.reel_render_next_retry_at&&new Date(meme.reel_render_next_retry_at).getTime()>nowMs)return {status:"rendering_on_github"};
   if(!env.GITHUB_TOKEN||!env.GITHUB_REPO){await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"renderer_not_configured",reel_render_locked_until:null})});return {status:"renderer_not_configured"};}
@@ -520,9 +526,9 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const decision=body.decision;
     if(!["approved","rejected"].includes(decision))return fail("Decision must be approved or rejected.");
     let publishFormat=body.publish_format||"auto";if(!["photo","reel","auto"].includes(publishFormat))return fail("publish_format must be photo, reel or auto.");
-    const memeReady=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,asset_url,reel_status,reel_asset_url,reel_song_id`);const ready=memeReady[0];
+    const memeReady=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,asset_url,reel_status,reel_asset_url,reel_song_id,output_format`);const ready=memeReady[0];
     // auto: about 30% of approved memes become Reels (when a Reel with a song exists), the rest are photo posts.
-    if(publishFormat==="auto"){const reelReady=ready?.reel_status==="generated"&&!!ready?.reel_asset_url&&!!ready?.reel_song_id;publishFormat=reelReady&&Math.random()<0.3?"reel":"photo";}
+    if(publishFormat==="auto"){publishFormat=ready?.output_format==="reel"?"reel":"photo";}
     if(decision==="approved"&&publishFormat==="photo"&&(ready?.processing_status!=="generated"||!ready?.asset_url))return fail("The BRAT final-frame photo asset is not ready yet.",409);
     if(decision==="approved"&&publishFormat==="reel"&&(ready?.reel_status!=="generated"||!ready?.reel_asset_url||!ready?.reel_song_id))return fail("The Reel and selected song are not ready yet.",409);
     if(body.account_id){
