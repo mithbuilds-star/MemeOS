@@ -11,6 +11,9 @@ export interface Env {
   APP_ENV?: string;
   RENDER_SERVICE_URL?: string;
   RENDER_SERVICE_TOKEN?: string;
+  RENDER_API_KEY?: string;
+  RENDER_OWNER_ID?: string;
+  RENDER_SERVICE_ID?: string;
   AI?: { run: (model: string, input: any) => Promise<any> };
 }
 type Ctx = { userId: string; token: string };
@@ -556,7 +559,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const updated=await db(env,"account_meme_assignments",`?id=eq.${assignmentMatch[1]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});return json({assignment:updated?.[0]});
   }
   if (p === "/pipeline" && method === "GET") {
-    const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&select=id,processing_status,reel_status,processing_error,processing_attempts,classification,extracted_text,source_username,created_at,processing_next_retry_at&order=created_at.desc&limit=500`);
+    const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&select=id,processing_status,reel_status,processing_error,processing_attempts,classification,extracted_text,source_username,created_at,processing_next_retry_at,processing_locked_until,reel_render_locked_until&order=created_at.desc&limit=500`);
     const processing: Record<string, number> = {};
     const reel: Record<string, number> = {};
     for (const r of rows) {
@@ -568,6 +571,19 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       !["generated", "rejected", "media_unavailable"].includes(r.processing_status || "") ||
       ["render_failed", "renderer_not_configured"].includes(r.reel_status || "")
     ).slice(0, 200);
+    const nowMs = Date.now();
+    const total = rows.length;
+    const stages = [
+      { label: "Text read", count: rows.filter((r) => !!r.extracted_text).length, total },
+      { label: "Classified", count: rows.filter((r) => r.classification === "suitable" || r.classification === "rejected").length, total },
+      { label: "Rendered and ready to approve", count: rows.filter((r) => r.processing_status === "generated").length, total },
+    ];
+    const stepFor = (st: string) => ({ needs_ocr: "Reading text (OCR)", ocr_complete: "Classifying", ready_for_asset: "Rendering BRAT video" } as Record<string, string>)[st] || st;
+    const isLocked = (r: any) => (r.processing_locked_until && new Date(r.processing_locked_until).getTime() > nowMs) || (r.reel_render_locked_until && new Date(r.reel_render_locked_until).getTime() > nowMs);
+    const running = rows.filter((r) => isLocked(r)).map((r) => ({ ...r, step: stepFor(r.processing_status) }));
+    const queued = rows.filter((r) => ["needs_ocr", "ocr_complete", "ready_for_asset"].includes(r.processing_status) && !isLocked(r))
+      .filter((r) => !r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs)
+      .map((r) => ({ ...r, step: stepFor(r.processing_status) }));
     let renderer = "not_configured";
     if (env.RENDER_SERVICE_URL) {
       try {
@@ -575,7 +591,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
         renderer = h.ok ? "ready" : `http_${h.status}`;
       } catch { renderer = "unreachable"; }
     }
-    return json({ counts: { processing, reel }, renderer, items });
+    return json({ counts: { processing, reel }, renderer, items, stages, running, queued });
   }
   if (p === "/pipeline/retry" && method === "POST") {
     // Requeue every stuck item in one pass, choosing the correct stage for each row.
@@ -593,6 +609,20 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     }
     const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_render_locked_until: null, reel_render_next_retry_at: null, processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
+  }
+  if (p === "/render-logs" && method === "GET") {
+    if (!env.RENDER_API_KEY || !env.RENDER_SERVICE_ID || !env.RENDER_OWNER_ID) return json({ configured: false, logs: [] });
+    const qs = new URLSearchParams({ ownerId: env.RENDER_OWNER_ID, direction: "backward", limit: "60", startTime: new Date(Date.now() - 60 * 60 * 1000).toISOString() });
+    qs.append("resource", env.RENDER_SERVICE_ID);
+    const r = await fetch(`https://api.render.com/v1/logs?${qs.toString()}`, { headers: { Authorization: `Bearer ${env.RENDER_API_KEY}`, Accept: "application/json" } });
+    const data: any = await r.json().catch(() => ({}));
+    if (!r.ok) return json({ configured: true, logs: [], error: `Render API returned ${r.status}.` });
+    const logs = (data.logs || []).map((l: any) => ({
+      timestamp: l.timestamp,
+      level: (l.labels || []).find((x: any) => x.name === "level")?.value || "info",
+      message: String(l.message || "").replace(/\x1b\[[0-9;]*m/g, ""),
+    })).reverse();
+    return json({ configured: true, logs });
   }
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}
   const processMatch=p.match(/^\/memes\/([0-9a-f-]+)\/process$/);

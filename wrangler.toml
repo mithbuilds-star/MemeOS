@@ -13,6 +13,8 @@ APP_ENV = "production"
 SUPABASE_URL = "https://brlqdwnpoamvfuhdpdtx.supabase.co"
 META_GRAPH_VERSION = "v27.0"
 RENDER_SERVICE_URL = "https://memeos.onrender.com"
+RENDER_OWNER_ID = "tea-dbt8mouk1f9s73b5uin0"
+RENDER_SERVICE_ID = "srv-dbt8om5g1s2s7393qn10"
 # Set RENDER_SERVICE_URL as a Worker runtime variable after deploying render-service.
 
 [triggers]
