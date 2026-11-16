@@ -580,7 +580,24 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       .filter((r) => !r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs)
       .map((r) => ({ ...r, step: stepFor(r.processing_status) }));
     const renderer = env.GITHUB_TOKEN && env.GITHUB_REPO ? "github_actions" : "not_configured";
-    return json({ counts: { processing, reel }, renderer, items, stages, running, queued });
+    const explain = (r: any): string => {
+      const err = r.processing_error ? ` Error: ${r.processing_error}` : "";
+      const locked = isLocked(r);
+      if (r.reel_status === "rendering") return "Video is rendering on GitHub Actions. It retries if no result comes back in 30 minutes.";
+      if (r.reel_status === "renderer_not_configured") return "The GitHub renderer is not configured. Set GITHUB_TOKEN and GITHUB_REPO on the Worker.";
+      if (r.reel_status === "render_failed") return `Video render failed.${err} It retries automatically.`;
+      if (r.reel_status === "waiting_for_song") return "Photo is ready. The reel needs a track in Song Library.";
+      switch (r.processing_status) {
+        case "needs_ocr": return locked ? "Reading text now." : (r.processing_attempts > 0 ? `Text reading failed.${err}` : "Waiting for the background job to read the text (runs every minute).");
+        case "ocr_complete": return locked ? "Classifying now." : `Waiting for classification.${err}`;
+        case "ready_for_asset": return locked ? "Starting the video render." : `Waiting to start the video render.${err}`;
+        case "low_confidence": return "No readable text was found. Needs manual review.";
+        case "processing_failed": return `Stopped after ${r.processing_attempts ?? 0} attempts.${err}`;
+        default: return `Status: ${r.processing_status}.${err}`;
+      }
+    };
+    const itemsWithWhy = items.map((r: any) => ({ ...r, why: explain(r) }));
+    return json({ counts: { processing, reel }, renderer, items: itemsWithWhy, stages, running, queued });
   }
   if (p === "/pipeline/retry" && method === "POST") {
     // Requeue every stuck item in one pass, choosing the correct stage for each row.
