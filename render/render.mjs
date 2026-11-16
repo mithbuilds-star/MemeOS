@@ -64,11 +64,33 @@ async function centreOffset(frame) {
     }
   }
   if (maxX < 0) return { dx: 0, dy: 0 };
-  const w = maxX - minX + 1;
-  const h = maxY - minY + 1;
-  const offset = { dx: Math.round((W - w) / 2 - minX), dy: Math.round((H - h) / 2 - minY) };
-  console.log('Centre measure', { background: [BR, BG, BB], box: { minX, minY, w, h }, offset });
-  // If the "text" covers almost the whole frame, the background was not detected; do not shift.
+  let w = maxX - minX + 1;
+  let h = maxY - minY + 1;
+  // The first pass finds the BRAT box (a slightly different green than the outer background).
+  // Measure the text inside that box, using the box colour as the background.
+  let tMinX = minX, tMinY = minY, tMaxX = maxX, tMaxY = maxY;
+  if (w * h > W * H * 0.5) {
+    const k = (minY + 2) * W * 3 + (minX + 2) * 3;
+    const IR = raw[k], IG = raw[k + 1], IB = raw[k + 2];
+    tMinX = W; tMinY = H; tMaxX = -1; tMaxY = -1;
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const i = (y * W + x) * 3;
+        if (Math.abs(raw[i] - IR) + Math.abs(raw[i + 1] - IG) + Math.abs(raw[i + 2] - IB) > TOL) {
+          if (x < tMinX) tMinX = x;
+          if (x > tMaxX) tMaxX = x;
+          if (y < tMinY) tMinY = y;
+          if (y > tMaxY) tMaxY = y;
+        }
+      }
+    }
+    if (tMaxX < 0) return { dx: 0, dy: 0 };
+    w = tMaxX - tMinX + 1;
+    h = tMaxY - tMinY + 1;
+  }
+  const offset = { dx: Math.round((W - w) / 2 - tMinX), dy: Math.round((H - h) / 2 - tMinY) };
+  console.log('Centre measure', { outer: [BR, BG, BB], text: { minX: tMinX, minY: tMinY, w, h }, offset });
+  // Safety: if the text still covers almost the whole frame, do not shift.
   if (w * h > W * H * 0.9) return { dx: 0, dy: 0 };
   return offset;
 }
