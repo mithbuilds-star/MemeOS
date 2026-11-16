@@ -1,0 +1,14 @@
+export declare const DEFAULTS: { maxAttempts: number; attemptTimeoutMs: number; renderWatchdogMs: number; backoffBaseMs: number; backoffCapMs: number };
+export declare function leaseMs(cfg?: typeof DEFAULTS): number;
+export declare function isActive(row: any): boolean;
+export declare function canClaim(row: any, nowMs: number): boolean;
+export declare function claimPatch(nowMs: number, token: string, cfg?: typeof DEFAULTS): Record<string, any>;
+export declare function renewPatch(nowMs: number, cfg?: typeof DEFAULTS): Record<string, any>;
+export declare function ownsRow(row: any, token: string | null | undefined): boolean;
+export declare function backoffMs(attempt: number, cfg?: typeof DEFAULTS): number;
+export declare function failureOutcome(row: any, message: unknown, nowMs: number, cfg?: typeof DEFAULTS): Record<string, any>;
+export declare function renderDispatchPatch(row: any, nowMs: number, cfg?: typeof DEFAULTS): Record<string, any>;
+export declare function shouldFailRender(row: any, cfg?: typeof DEFAULTS): boolean;
+export declare function staleRecovery(row: any, nowMs: number, cfg?: typeof DEFAULTS): Record<string, any> | null;
+export declare function casPatch(store: any, id: string, token: string, patch: Record<string, any>): Promise<any[]>;
+export declare function logEvent(event: string, fields: Record<string, unknown>): string;

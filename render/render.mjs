@@ -16,6 +16,8 @@ const SUPABASE_URL = (env.SUPABASE_URL || '').replace(/\/$/, '');
 const KEY = env.SUPABASE_SECRET_KEY || '';
 const MEME_ID = env.MEME_ID || '';
 const OWNER_ID = env.OWNER_ID || '';
+// Attempt token from the Worker. When set, every write must still match the job's processing_token.
+const ATTEMPT_TOKEN = env.ATTEMPT_TOKEN || '';
 const W = 1080;
 const H = 1080; // 1:1 BRAT square
 const REEL_W = 1080;
@@ -115,13 +117,18 @@ async function signSongUrl(songId) {
 }
 
 async function patchMeme(patch) {
-  const url = `${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}`;
+  const url = `${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}${ATTEMPT_TOKEN ? `&processing_token=eq.${encodeURIComponent(ATTEMPT_TOKEN)}` : ''}`;
   const r = await fetch(url, {
     method: 'PATCH',
-    headers: { apikey: KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    // With a token, return the row so a write that matched nothing (ownership lost) is detected.
+    headers: { apikey: KEY, 'Content-Type': 'application/json', Prefer: ATTEMPT_TOKEN ? 'return=representation' : 'return=minimal' },
     body: JSON.stringify(patch),
   });
   if (!r.ok) throw new Error(`Database update failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
+  if (ATTEMPT_TOKEN) {
+    const rows = await r.json().catch(() => []);
+    if (!Array.isArray(rows) || rows.length === 0) throw new Error('Ownership lost: this render no longer owns the job; its result was discarded.');
+  }
 }
 
 async function upload(objectPath, bytes, contentType) {
@@ -171,7 +178,7 @@ async function main() {
       ? (() => {
           const P = Math.max(Math.abs(measured.ox), Math.abs(measured.oy));
           const hex = measured.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
-          return `crop=${measured.w}:${measured.h}:${measured.x}:${measured.y},pad=${W + 2 * P}:${H + 2 * P}:${P + measured.ox}:${P + measured.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},scale=${REEL_W}:${REEL_W}:flags=lanczos`;
+          return `scale=${W}:${H}:flags=lanczos,crop=${measured.w}:${measured.h}:${measured.x}:${measured.y},pad=${W + 2 * P}:${H + 2 * P}:${P + measured.ox}:${P + measured.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},scale=${REEL_W}:${REEL_W}:flags=lanczos`;
         })()
       : `scale=${REEL_W}:${REEL_W}:flags=lanczos`;
 
@@ -231,6 +238,7 @@ async function main() {
       processing_locked_until: null,
       reel_render_locked_until: null,
       reel_render_next_retry_at: null,
+      processing_token: null,
     });
     console.log('Render complete', { videoPath, posterPath, freeze, hasAudio: !!audioPath });
   } finally {
@@ -248,6 +256,7 @@ main().catch(async (e) => {
         reel_render_locked_until: null,
         reel_render_next_retry_at: null, // no automatic retry: the user presses Retry
         processing_locked_until: null,
+        processing_token: null,
       });
     }
   } catch (err) {

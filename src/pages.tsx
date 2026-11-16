@@ -82,7 +82,7 @@ export function Discovery() {
   </>;
 }
 
-function useMemes() { const [memes,setMemes]=useState<Meme[]>([]);const [error,setError]=useState("");const load=()=>api("/memes").then(r=>setMemes(r.memes||[])).catch(e=>setError(e.message));useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer)},[]);return {memes,error,load}; }
+function useMemes() { const [memes,setMemes]=useState<Meme[]>([]);const [error,setError]=useState("");const requested=useRef(0);const applied=useRef(0);const load=()=>{const mine=++requested.current;return api("/memes").then(r=>{if(mine>applied.current){applied.current=mine;setMemes(r.memes||[]);}}).catch(e=>{if(mine>applied.current)setError(e.message);});};useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer)},[]);return {memes,error,load}; }
 export function Queue() {
   const {memes,error,load}=useMemes();const [busy,setBusy]=useState("");const [message,setMessage]=useState("");const [autoProcess,setAutoProcess]=useState(true);const [paused,setPaused]=useState(false);
   const [accounts,setAccounts]=useState<any[]>([]);const [targetAccount,setTargetAccount]=useState("");const [assignmentRows,setAssignmentRows]=useState<any[]>([]);
