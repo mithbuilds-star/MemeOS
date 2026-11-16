@@ -144,9 +144,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   if (!itemsRes.ok) throw new Error(`Could not retrieve Apify dataset (${itemsRes.status}).`);
   const items:any[] = await itemsRes.json();
   // Each account has a window: skip what was already scraped (its offset), keep the next 20 posts.
-  const sourceNames:string[]=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames.map((u:string)=>String(u).replace(/^@/,"").toLowerCase()):[];
+  const windowNames:string[]=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames.map((u:string)=>String(u).replace(/^@/,"").toLowerCase()):[];
   const offsetOf:Record<string,number>={};
-  for(const name of sourceNames){const rows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(name)}&select=scraped_offset`);offsetOf[name]=Number(rows?.[0]?.scraped_offset||0);}
+  for(const name of windowNames){const rows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(name)}&select=scraped_offset`);offsetOf[name]=Number(rows?.[0]?.scraped_offset||0);}
   const seenPer:Record<string,number>={};const consumed:Record<string,number>={};
   const batch=items.filter((item:any)=>{const u=String(item.ownerUsername||item.username||"").toLowerCase();if(!u||!(u in offsetOf))return true;const i=seenPer[u]||0;seenPer[u]=i+1;if(i>=offsetOf[u]&&i<offsetOf[u]+SCRAPE_BATCH){consumed[u]=(consumed[u]||0)+1;return true;}return false;});
   let inserted = 0, skipped = 0, failedMedia = 0;
