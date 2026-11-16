@@ -12,6 +12,8 @@ const PORT = Number(process.env.PORT || 8787);
 const TOKEN = process.env.RENDER_SERVICE_TOKEN || '';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const MAX_AUDIO_BYTES = 30 * 1024 * 1024;
+const W = 720;
+const H = 1280;
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n)));
 function run(args) {
   return new Promise((resolve,reject)=>{
@@ -44,7 +46,7 @@ async function render(body) {
       fast_progress:false,
       theme:'brat',
       lyric:{maxWordPerLayer:999,frameDuration:0.24,lastFrameDuration:0.001},
-      brat:{W:1080,H:1920,BOX_W:960,BOX_H:1680,BOX_PAD:60,C_BG:'#b7ff3c',C_TEXT:'#111111',FONT_NAME:'Arimo',FONT_WEIGHT:700,fontPaths:[path.join(__dirname,'fonts','Arimo-Bold.ttf')]}
+      brat:{W,H,BOX_W:640,BOX_H:1120,BOX_PAD:40,C_BG:'#b7ff3c',C_TEXT:'#111111',FONT_NAME:'Arimo',FONT_WEIGHT:700,fontPaths:[path.join(__dirname,'fonts','Arimo-Bold.ttf')]}
     });
     await writeFile(source,generated);
     const audioUrl=body.audio_url?String(body.audio_url):'';
@@ -61,7 +63,7 @@ async function render(body) {
     const args=['-y','-hide_banner','-loglevel','error','-i',source];
     if(audioPath)args.push('-stream_loop','-1','-i',audioPath);
     // tpad clones the final encoded frame for exactly the user-selected 0–5 seconds.
-    args.push('-vf',`tpad=stop_mode=clone:stop_duration=${freeze},scale=1080:1920:flags=lanczos,format=yuv420p`,'-map','0:v:0');
+    args.push('-vf',`tpad=stop_mode=clone:stop_duration=${freeze},scale=${W}:${H}:flags=lanczos,format=yuv420p`,'-map','0:v:0');
     if(audioPath)args.push('-map','1:a:0');
     args.push('-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-movflags','+faststart');
     if(audioPath)args.push('-c:a','aac','-b:a','160k','-shortest');
@@ -71,9 +73,9 @@ async function render(body) {
     await run(['-y','-hide_banner','-loglevel','error','-sseof','-0.05','-i',finalVideo,'-frames:v','1','-update','1',finalFrame]);
     // Instagram feed photos have a taller-than-4:5 limit. Fit the entire last frame
     // into a 4:5 canvas (no content crop) for the native photo-post asset.
-    await run(['-y','-hide_banner','-loglevel','error','-i',finalFrame,'-vf','scale=760:1350:force_original_aspect_ratio=decrease,pad=1080:1350:(ow-iw)/2:(oh-ih)/2:color=0xB7FF3C,format=rgb24','-frames:v','1',poster]);
+    await run(['-y','-hide_banner','-loglevel','error','-i',finalFrame,'-vf','scale=500:900:force_original_aspect_ratio=decrease,pad=720:900:(ow-iw)/2:(oh-ih)/2:color=0xB7FF3C,format=rgb24','-frames:v','1',poster]);
     const [video,posterBytes]=await Promise.all([readFile(finalVideo),readFile(poster)]);
-    return {video_base64:video.toString('base64'),poster_base64:posterBytes.toString('base64'),freeze_seconds:freeze,width:1080,height:1920,poster_width:1080,poster_height:1350,has_audio:!!audioPath,renderer:'brat-canvas-video'};
+    return {video_base64:video.toString('base64'),poster_base64:posterBytes.toString('base64'),freeze_seconds:freeze,width:W,height:H,poster_width:720,poster_height:900,has_audio:!!audioPath,renderer:'brat-canvas-video'};
   } finally { await rm(dir,{recursive:true,force:true}); }
 }
 // Renders are memory-heavy (BRAT frames + FFmpeg + base64 output). Run them strictly
