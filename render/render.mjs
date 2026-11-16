@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm, stat, copyFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -34,6 +34,37 @@ function run(args) {
     p.on('error', reject);
     p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`FFmpeg failed (${code}): ${err.slice(-1500)}`))));
   });
+}
+
+// Finds the text's bounding box in the last frame and returns the shift that centres it in the square.
+// ffmpeg outputs raw RGB pixels; any pixel that is not the brand green counts as text.
+async function centreOffset(frame) {
+  const raw = await new Promise((resolve, reject) => {
+    const p = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', frame, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+    const chunks = [];
+    p.stdout.on('data', (d) => chunks.push(d));
+    p.stderr.on('data', () => {});
+    p.on('error', reject);
+    p.on('close', (code) => (code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`Could not read frame pixels (${code}).`))));
+  });
+  if (raw.length !== W * H * 3) return { dx: 0, dy: 0 };
+  const BR = 0xb7, BG = 0xff, BB = 0x3c, TOL = 40;
+  let minX = W, minY = H, maxX = -1, maxY = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 3;
+      if (Math.abs(raw[i] - BR) + Math.abs(raw[i + 1] - BG) + Math.abs(raw[i + 2] - BB) > TOL) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return { dx: 0, dy: 0 };
+  const w = maxX - minX + 1;
+  const h = maxY - minY + 1;
+  return { dx: Math.round((W - w) / 2 - minX), dy: Math.round((H - h) / 2 - minY) };
 }
 
 async function patchMeme(patch) {
@@ -111,8 +142,10 @@ async function main() {
     // Decode the last second and keep overwriting one file; the file left behind is the true last frame.
     await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', finalVideo, '-update', '1', '-q:v', '1', finalFrame]);
     if (!(await stat(finalFrame).catch(() => null))) throw new Error('Could not extract the last frame from the rendered video.');
-    // Photo = the exact last frame, untouched (square, no padding), so it matches the video 1:1.
-    await copyFile(finalFrame, poster);
+    // Photo = the last frame, shifted so the text sits in the exact centre of the square, on the same green.
+    const { dx, dy } = await centreOffset(finalFrame);
+    await run(['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=c=0xB7FF3C:s=${W}x${H}`, '-i', finalFrame,
+      '-filter_complex', `[0:v][1:v]overlay=x=${dx}:y=${dy}:format=auto,format=rgb24`, '-frames:v', '1', poster]);
 
     const videoBytes = await readFile(finalVideo);
     const posterBytes = await readFile(poster);
