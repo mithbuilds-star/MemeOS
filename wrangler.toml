@@ -12,6 +12,7 @@ not_found_handling = "single-page-application"
 APP_ENV = "production"
 SUPABASE_URL = "https://brlqdwnpoamvfuhdpdtx.supabase.co"
 META_GRAPH_VERSION = "v27.0"
+RENDER_SERVICE_URL = "https://memeos.onrender.com"
 # Set RENDER_SERVICE_URL as a Worker runtime variable after deploying render-service.
 
 [triggers]
