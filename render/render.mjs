@@ -224,7 +224,7 @@ main().catch(async (e) => {
         reel_status: 'render_failed',
         processing_error: String(e?.message || e).slice(0, 500),
         reel_render_locked_until: null,
-        reel_render_next_retry_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        reel_render_next_retry_at: null, // no automatic retry: the user presses Retry
         processing_locked_until: null,
       });
     }
