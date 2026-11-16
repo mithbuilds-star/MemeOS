@@ -76,6 +76,17 @@ async function render(body) {
     return {video_base64:video.toString('base64'),poster_base64:posterBytes.toString('base64'),freeze_seconds:freeze,width:1080,height:1920,poster_width:1080,poster_height:1350,has_audio:!!audioPath,renderer:'brat-canvas-video'};
   } finally { await rm(dir,{recursive:true,force:true}); }
 }
+// Renders are memory-heavy (BRAT frames + FFmpeg + base64 output). Run them strictly
+// one at a time so a 512 MB instance never holds two jobs at once. Extra requests wait
+// in this queue; /health and auth checks stay immediate.
+let renderChain=Promise.resolve();
+let queued=0;
+function runSerially(task){
+  queued+=1;
+  const next=renderChain.then(()=>task());
+  renderChain=next.catch(()=>{}).finally(()=>{queued-=1;});
+  return next;
+}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('Access-Control-Allow-Origin','*');
   res.setHeader('Access-Control-Allow-Headers','content-type,x-render-token');
@@ -84,7 +95,10 @@ const server=http.createServer(async(req,res)=>{
   if(req.url==='/health'&&req.method==='GET'){res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({ok:true,service:'memeos-render-service',renderer:'brat-canvas-video'}));return;}
   if(req.url!=='/render'||req.method!=='POST'){res.writeHead(404).end('Not found');return;}
   if(!TOKEN||req.headers['x-render-token']!==TOKEN){res.writeHead(401).end('Unauthorized');return;}
-  try{let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>2_000_000)throw new Error('Request too large.');}const result=await render(JSON.parse(raw));res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(result));}
+  try{let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>2_000_000)throw new Error('Request too large.');}console.log(`render queued (waiting: ${queued})`);const result=await runSerially(()=>render(JSON.parse(raw)));res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(result));}
   catch(e){res.writeHead(400,{'content-type':'application/json'}).end(JSON.stringify({error:e.message||'Render failed'}));}
 });
+// A queued render can wait behind another; don't let Node cut the connection.
+server.requestTimeout=0;
+server.headersTimeout=120000;
 server.listen(PORT,'0.0.0.0',()=>console.log(`MemeOS render service listening on ${PORT}`));
