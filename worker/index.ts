@@ -292,9 +292,12 @@ async function runBackgroundProcessing(env:Env){
       const latestRows=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&select=processing_status,processing_attempts`);
       const latest=latestRows?.[0]||meme;
       const attempts=Number(latest.processing_attempts||0)+1;
-      const exhausted=attempts>=5;
+      const exhausted=attempts>=3;
       const delay=Math.min(360,Math.pow(2,attempts)*5);
-      await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_attempts:attempts,processing_error:String(e?.message||e).slice(0,500),processing_status:exhausted?"processing_failed":latest.processing_status,processing_next_retry_at:exhausted?null:new Date(Date.now()+delay*60*1000).toISOString(),processing_locked_until:null})});
+      const patch:any={processing_attempts:attempts,processing_error:String(e?.message||e).slice(0,500),processing_status:exhausted?"rejected":latest.processing_status,processing_next_retry_at:exhausted?null:new Date(Date.now()+delay*60*1000).toISOString(),processing_locked_until:null};
+      // After 3 failed automatic attempts the item is discarded rather than left in limbo.
+      if(exhausted){patch.classification="rejected";patch.classification_reason="Discarded automatically after 3 failed processing attempts.";}
+      await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});
     }
   }
 }
