@@ -48,7 +48,9 @@ async function centreOffset(frame) {
     p.on('close', (code) => (code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`Could not read frame pixels (${code}).`))));
   });
   if (raw.length !== W * H * 3) return { dx: 0, dy: 0 };
-  const BR = 0xb7, BG = 0xff, BB = 0x3c, TOL = 40;
+  // The background is whatever colour the corner is, so a slightly different green still works.
+  const BR = raw[0], BG = raw[1], BB = raw[2];
+  const TOL = 60;
   let minX = W, minY = H, maxX = -1, maxY = -1;
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
@@ -64,7 +66,11 @@ async function centreOffset(frame) {
   if (maxX < 0) return { dx: 0, dy: 0 };
   const w = maxX - minX + 1;
   const h = maxY - minY + 1;
-  return { dx: Math.round((W - w) / 2 - minX), dy: Math.round((H - h) / 2 - minY) };
+  const offset = { dx: Math.round((W - w) / 2 - minX), dy: Math.round((H - h) / 2 - minY) };
+  console.log('Centre measure', { background: [BR, BG, BB], box: { minX, minY, w, h }, offset });
+  // If the "text" covers almost the whole frame, the background was not detected; do not shift.
+  if (w * h > W * H * 0.9) return { dx: 0, dy: 0 };
+  return offset;
 }
 
 async function patchMeme(patch) {
