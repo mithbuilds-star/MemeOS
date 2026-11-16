@@ -582,6 +582,80 @@ async function refreshInstagramTokens(env: Env) {
   }
 }
 
+// Instagram Login Graph calls. Tokens are only ever sent server-side.
+async function graphRequest(version: string, pathWithQuery: string, init?: RequestInit): Promise<any> {
+  const res = await fetch(`https://graph.instagram.com/${version}/${pathWithQuery}`, init);
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error?.message || `Meta Graph request failed (${res.status}).`);
+  return data;
+}
+
+// Publishes one approved, scheduled assignment with the official Content Publishing flow:
+// create container -> wait until FINISHED -> media_publish. Failures never leave a fake "published" state.
+async function publishAssignment(env: Env, item: { id: string; owner_id: string }) {
+  const ctx: Ctx = { userId: item.owner_id, token: "" };
+  const setAssignment = (patch: any) =>
+    db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}`, { method: "PATCH", body: JSON.stringify(patch) });
+  const recordHistory = (row: any) =>
+    db(env, "publishing_history", "", { method: "POST", body: JSON.stringify({ owner_id: item.owner_id, ...row }) }).catch(() => {});
+  let assignmentRow: any = null;
+  try {
+    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url),instagram_accounts(id,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at)`);
+    assignmentRow = rows?.[0];
+    if (!assignmentRow) throw new Error("Scheduled assignment no longer exists.");
+    const account = assignmentRow.instagram_accounts;
+    const meme = assignmentRow.memes;
+    if (!account?.meta_access_token_enc || !account?.meta_user_id) throw new Error("This account is not connected to Instagram. Reconnect it in Accounts.");
+    if (!account.meta_token_expires_at || new Date(account.meta_token_expires_at).getTime() < Date.now()) throw new Error("The Instagram token has expired. Reconnect this account.");
+
+    // Idempotency: never publish the same meme to the same account twice.
+    const done: any[] = await db(env, "publishing_history", `?owner_id=eq.${encodeURIComponent(item.owner_id)}&meme_id=eq.${meme.id}&destination_account_id=eq.${account.id}&status=eq.published&select=id,meta_media_id,permalink&limit=1`);
+    if (done?.length) { await setAssignment({ status: "published", publishing_locked_until: null }); return; }
+
+    const isReel = meme.output_format === "reel";
+    const mediaUrl = isReel ? meme.reel_asset_url : meme.asset_url;
+    if (!mediaUrl) throw new Error(isReel ? "The Reel file is missing. Reprocess this meme." : "The photo file is missing. Reprocess this meme.");
+    if (!isReel && /\.png(\?|$)/i.test(mediaUrl)) throw new Error("Instagram photo posts need a JPEG file, and this BRAT photo is PNG. Photo publishing needs a JPEG render first.");
+
+    const token = await decryptSecret(env, { encrypted_secret: account.meta_access_token_enc, encryption_iv: account.meta_access_token_iv });
+    const version = env.META_GRAPH_VERSION || "v27.0";
+    const userId = encodeURIComponent(account.meta_user_id);
+
+    const form = new URLSearchParams();
+    form.set("access_token", token);
+    if (isReel) { form.set("media_type", "REELS"); form.set("video_url", mediaUrl); }
+    else form.set("image_url", mediaUrl);
+    const container = await graphRequest(version, `${userId}/media`, { method: "POST", body: form });
+    const creationId = encodeURIComponent(container.id);
+
+    let statusCode = "IN_PROGRESS";
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const s = await graphRequest(version, `${creationId}?fields=status_code&access_token=${encodeURIComponent(token)}`);
+      statusCode = s.status_code || "IN_PROGRESS";
+      if (statusCode === "FINISHED") break;
+      if (statusCode === "ERROR" || statusCode === "EXPIRED") throw new Error(`Instagram rejected the media (${statusCode}).`);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    if (statusCode !== "FINISHED") throw new Error("Instagram is still processing the media. Check Instagram before retrying to avoid a duplicate.");
+
+    const pub = new URLSearchParams();
+    pub.set("access_token", token);
+    pub.set("creation_id", container.id);
+    const published = await graphRequest(version, `${userId}/media_publish`, { method: "POST", body: pub });
+
+    let permalink: string | null = null;
+    try { const m = await graphRequest(version, `${encodeURIComponent(published.id)}?fields=permalink&access_token=${encodeURIComponent(token)}`); permalink = m.permalink || null; } catch {}
+    const now = new Date().toISOString();
+    await recordHistory({ meme_id: meme.id, destination_account_id: account.id, meta_media_id: published.id, permalink, status: "published", published_at: now });
+    await setAssignment({ status: "published", publishing_locked_until: null, rejection_reason: null });
+  } catch (e: any) {
+    const message = String(e?.message || e).slice(0, 500);
+    LOG("publish_failed", { assignment: item.id, message });
+    await setAssignment({ status: "needs_review", publishing_locked_until: null, rejection_reason: message }).catch(() => {});
+    if (assignmentRow) await recordHistory({ meme_id: assignmentRow.meme_id, destination_account_id: assignmentRow.destination_account_id, status: "failed", error_message: message });
+  }
+}
+
 async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Response> {
   const p = url.pathname.replace(/^\/api/, "");
   const method = req.method;
