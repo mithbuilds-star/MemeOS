@@ -205,6 +205,7 @@ export function Pipeline() {
   const load=()=>{api("/pipeline").then(setData).catch(e=>setError(e.message))};
   useEffect(()=>{load();const t=setInterval(load,15000);return ()=>clearInterval(t)},[]);
   const retryAll=async()=>{setBusy("all");setMessage("");try{const r=await api("/pipeline/retry",{method:"POST",body:"{}"});setMessage(r.requeued+r.reel_requeued===0?"Nothing to retry. Every unfinished item is waiting on something else, see the WHY column.":`Requeued ${r.requeued} item(s) and ${r.reel_requeued} reel render(s). They run on the next cron tick.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
+  const discardOne=async(id:string)=>{setBusy(id);setMessage("");try{await api(`/memes/${id}/discard`,{method:"POST",body:"{}"});setMessage("Discarded.");load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const retryOne=async(id:string)=>{setBusy(id);setMessage("");try{const r=await api(`/memes/${id}/process`,{method:"POST",body:"{}"});setMessage(`Queued ${id.slice(0,8)} at ${r.processing_status}.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const stages:any[]=data?.stages||[];const running:any[]=data?.running||[];const queued:any[]=data?.queued||[];
   const rendererOk=data?.renderer==="github_actions";
@@ -234,7 +235,7 @@ export function Pipeline() {
     </div>
     <div className="panel" style={{marginTop:18}}>
       <div className="panel-head"><div><h3>Not finished</h3><p>Each item and why it is not done yet. Retry one or all.</p></div><span className="tag">{data?.items?.length??0} ITEMS</span></div>
-      {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>WHY</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small>{m.why}</small></td><td>{m.processing_attempts??0}</td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button></td></tr>)}</tbody></table></div>}
+      {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>WHY</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small>{m.why}</small></td><td>{m.processing_attempts??0}</td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button><button className="btn secondary small" style={{marginLeft:6}} disabled={busy===m.id} onClick={()=>{if(!confirm("Discard this item? It will not be retried."))return;discardOne(m.id)}}><X size={14}/> Discard</button></td></tr>)}</tbody></table></div>}
     </div>
   </>;
 }

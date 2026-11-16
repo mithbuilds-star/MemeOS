@@ -749,6 +749,16 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const itemsWithWhy = items.map((r: any) => ({ ...r, why: explain(r) }));
     return json({ counts: { processing, reel }, renderer, items: itemsWithWhy, stages, running, queued });
   }
+  const discardMatch=p.match(/^\/memes\/([0-9a-f-]+)\/discard$/);
+  if(discardMatch&&method==="POST"){
+    const memeId=discardMatch[1];
+    const rows=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=id,processing_status`);
+    if(!rows.length)return fail("Meme not found.",404);
+    if(rows[0].processing_status==="generated")return fail("Generated items are not stuck; they can be rejected from the approval queue instead.",409);
+    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&processing_status=neq.generated`,{method:"PATCH",body:JSON.stringify({processing_status:"rejected",classification:"rejected",classification_reason:"Discarded by user from Not Finished.",processing_locked_until:null,processing_next_retry_at:null})});
+    if(!updated?.length)return fail("Could not discard this item. It may have just finished.",409);
+    return json({meme:updated[0]});
+  }
   if (p === "/pipeline/retry" && method === "POST") {
     // Requeue every stuck item in one pass, choosing the correct stage for each row.
     const reset = { processing_attempts: 0, processing_error: null, processing_next_retry_at: null, processing_locked_until: null, reel_render_locked_until: null, reel_render_next_retry_at: null };
