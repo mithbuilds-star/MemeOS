@@ -19,16 +19,32 @@ const fail = (message: string, status = 400) => json({ error: message }, status)
 // Supabase publishable/secret API keys are not JWTs. Send the secret key only in apikey;
 // do not put it in Authorization: Bearer. Supabase API Gateway derives the service role.
 const headers = (env: Env) => ({ apikey: env.SUPABASE_SECRET_KEY, "Content-Type": "application/json" });
-async function auth(req: Request, env: Env): Promise<Ctx | null> {
-  const token = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "");
-  // Auth user validation must use the public/publishable API key. The secret key
-  // is reserved for server-side database/storage operations and is not the Auth
-  // API client key.
-  if (!token || !env.SUPABASE_URL || !env.SUPABASE_PUBLISHABLE_KEY) return null;
-  const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${token}` } });
-  if (!r.ok) return null;
-  const u: any = await r.json();
-  return u?.id ? { userId: u.id, token } : null;
+type AuthResult = { ctx: Ctx; error?: never } | { ctx?: never; error: string };
+async function auth(req: Request, env: Env): Promise<AuthResult> {
+  const token = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+  if (!token) return { error: "No Supabase session token was sent. Sign out and sign in again." };
+  if (!env.SUPABASE_URL) return { error: "Worker configuration is missing SUPABASE_URL." };
+  if (!env.SUPABASE_SECRET_KEY) return { error: "Worker secret SUPABASE_SECRET_KEY is missing. Add it under Cloudflare Worker Secrets and redeploy." };
+  try {
+    // This is a server-to-server Auth request: use the secret API key in `apikey`
+    // and the user's actual Supabase access token in `Authorization: Bearer`.
+    // The API key itself is never used as a bearer token or sent to the browser.
+    const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: env.SUPABASE_SECRET_KEY, Authorization: `Bearer ${token}` }
+    });
+    const body = await r.text();
+    if (!r.ok) {
+      let detail = body;
+      try { const parsed = JSON.parse(body); detail = parsed.msg || parsed.message || parsed.error_description || parsed.error || body; } catch {}
+      return { error: `Supabase rejected the session (HTTP ${r.status}): ${String(detail).slice(0, 220) || "No error details returned."} Sign out and sign in again if the session has expired.` };
+    }
+    let u: any;
+    try { u = JSON.parse(body); } catch { return { error: "Supabase Auth returned an unreadable user response." }; }
+    if (!u?.id) return { error: "Supabase accepted the request but returned no user ID. Sign in again." };
+    return { ctx: { userId: u.id, token } };
+  } catch (e: any) {
+    return { error: `Could not reach Supabase Auth: ${String(e?.message || e).slice(0, 180)}` };
+  }
 }
 async function db(env: Env, table: string, path = "", init: RequestInit = {}) {
   const r = await fetch(`${env.SUPABASE_URL}/rest/v1/${table}${path}`, { ...init, headers: { ...headers(env), Prefer: "return=representation", ...(init.headers || {}) } });
@@ -681,8 +697,8 @@ export default {
     }
     if(url.pathname==="/api/meta/callback") return metaCallback(req,env,url);
     if(url.pathname.startsWith("/api/")){
-      const ctx=await auth(req,env);if(!ctx)return fail("Authentication required.",401);
-      try{return await route(req,env,ctx,url)}catch(e:any){return fail(e.message||"Internal error",500)}
+      const authResult=await auth(req,env);if(!authResult.ctx)return fail(authResult.error,401);
+      try{return await route(req,env,authResult.ctx,url)}catch(e:any){return fail(e.message||"Internal error",500)}
     }
     return env.ASSETS.fetch(req);
   },
