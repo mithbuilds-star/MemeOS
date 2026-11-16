@@ -572,7 +572,10 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     ];
     const stepFor = (st: string) => ({ needs_ocr: "Reading text (OCR)", ocr_complete: "Classifying", ready_for_asset: "Rendering BRAT video" } as Record<string, string>)[st] || st;
     const isLocked = (r: any) => (r.processing_locked_until && new Date(r.processing_locked_until).getTime() > nowMs) || (r.reel_render_locked_until && new Date(r.reel_render_locked_until).getTime() > nowMs);
-    const running = rows.filter((r) => isLocked(r)).map((r) => ({ ...r, step: stepFor(r.processing_status) }));
+    // Only count real work: a stale lease on a finished meme is not "running".
+    const running = rows
+      .filter((r) => isLocked(r) && (r.processing_status !== "generated" || r.reel_status === "rendering"))
+      .map((r) => ({ ...r, step: r.reel_status === "rendering" ? "Rendering video on GitHub" : stepFor(r.processing_status) }));
     const queued = rows.filter((r) => ["needs_ocr", "ocr_complete", "ready_for_asset"].includes(r.processing_status) && !isLocked(r))
       .filter((r) => !r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs)
       .map((r) => ({ ...r, step: stepFor(r.processing_status) }));
