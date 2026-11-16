@@ -22,7 +22,7 @@ export function Login({ configured }: { configured: boolean }) {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(""); setMessage(""); setBusy(true);
     try {
-      if (!supabase) throw new Error("Configure the Supabase frontend environment variables first.");
+      if (!supabase) throw new Error("Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Cloudflare Worker runtime variables first.");
       const result = mode === "login"
         ? await supabase.auth.signInWithPassword({ email, password })
         : await supabase.auth.signUp({ email, password });
@@ -32,7 +32,7 @@ export function Login({ configured }: { configured: boolean }) {
     finally { setBusy(false); }
   };
   return <div className="login-screen"><div className="login-card"><div className="brand login-brand"><div className="brand-mark"><Sparkles size={19}/></div><div><b>MemeOS</b><small>CONTENT OPERATIONS</small></div></div><div className="eyebrow">YOUR WORKSPACE</div><h1>{mode === "login" ? "Welcome back." : "Create your account."}</h1><p>Manage discovery, creation and publishing from one place.</p>
-    {!configured && <Notice kind="warn">Supabase is not configured. Add your environment variables before signing in.</Notice>}
+    {!configured && <Notice kind="warn">Supabase runtime config was not found. In Cloudflare → memeos → Settings → Variables, add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY, then redeploy.</Notice>}
     <form onSubmit={submit}><label>Email address<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" minLength={8} required value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 8 characters"/></label><button className="btn primary full" disabled={busy || !configured}>{busy ? <Loader2 className="spin" size={16}/> : null}{mode === "login" ? "Sign in" : "Create account"}</button></form>
     {error && <Notice kind="error">{error}</Notice>}{message && <Notice kind="success">{message}</Notice>}<div className="login-switch">{mode === "login" ? "New to MemeOS?" : "Already have an account?"} <button onClick={()=>setMode(mode==="login"?"signup":"login")}>{mode==="login"?"Create account":"Sign in"}</button></div>
   </div></div>;

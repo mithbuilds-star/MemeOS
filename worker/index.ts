@@ -1,6 +1,7 @@
 export interface Env {
   ASSETS: Fetcher;
   SUPABASE_URL: string;
+  SUPABASE_PUBLISHABLE_KEY: string;
   SUPABASE_SECRET_KEY: string;
   CREDENTIALS_ENCRYPTION_KEY?: string;
   META_APP_ID?: string;
@@ -670,6 +671,11 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url=new URL(req.url);
+    // Public browser configuration: the publishable key is designed to be public.
+    // Never return SUPABASE_SECRET_KEY from this endpoint.
+    if(url.pathname==="/api/public-config") {
+      return new Response(JSON.stringify({supabaseUrl:env.SUPABASE_URL||"",publishableKey:env.SUPABASE_PUBLISHABLE_KEY||""}),{status:200,headers:{"Content-Type":"application/json","Cache-Control":"no-store, max-age=0"}});
+    }
     if(url.pathname==="/api/meta/callback") return metaCallback(req,env,url);
     if(url.pathname.startsWith("/api/")){
       const ctx=await auth(req,env);if(!ctx)return fail("Authentication required.",401);

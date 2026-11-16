@@ -80,19 +80,9 @@ const server=http.createServer(async(req,res)=>{
   res.setHeader('Access-Control-Allow-Origin','*');
   res.setHeader('Access-Control-Allow-Headers','content-type,x-render-token');
   res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
-  const pathname = new URL(req.url || '/', 'http://localhost').pathname.replace(/\/+$/, '') || '/';
   if(req.method==='OPTIONS'){res.writeHead(204).end();return;}
-  // Friendly root endpoint: opening the Render service URL in a browser should
-  // confirm that the correct container is deployed instead of returning a 404.
-  if(pathname==='/'&&req.method==='GET'){
-    res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({ok:true,service:'memeos-render-service',status:'running',endpoints:{health:'GET /health',render:'POST /render'},renderer:'brat-canvas-video'}));
-    return;
-  }
-  if((pathname==='/health'||pathname==='/healthz')&&req.method==='GET'){
-    res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({ok:true,service:'memeos-render-service',status:'healthy',renderer:'brat-canvas-video'}));
-    return;
-  }
-  if(pathname!=='/render'||req.method!=='POST'){res.writeHead(404,{'content-type':'application/json'}).end(JSON.stringify({error:'Not found',available:['GET /','GET /health','POST /render']}));return;}
+  if(req.url==='/health'&&req.method==='GET'){res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({ok:true,service:'memeos-render-service',renderer:'brat-canvas-video'}));return;}
+  if(req.url!=='/render'||req.method!=='POST'){res.writeHead(404).end('Not found');return;}
   if(!TOKEN||req.headers['x-render-token']!==TOKEN){res.writeHead(401).end('Unauthorized');return;}
   try{let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>2_000_000)throw new Error('Request too large.');}const result=await render(JSON.parse(raw));res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(result));}
   catch(e){res.writeHead(400,{'content-type':'application/json'}).end(JSON.stringify({error:e.message||'Render failed'}));}

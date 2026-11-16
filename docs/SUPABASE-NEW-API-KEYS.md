@@ -1,26 +1,25 @@
-# Supabase API keys used by MemeOS
+# Supabase current API keys in MemeOS
 
-MemeOS is configured for Supabase's current API key format. Use the new keys, not the legacy JWT-based `anon` and `service_role` keys.
+MemeOS uses Supabase's current API key format, not the legacy JWT-based `anon` and `service_role` API keys.
 
-## Get the keys
+## Cloudflare Worker runtime variables
 
-In Supabase Dashboard, open **Project Settings → API Keys** and select **Publishable and secret API keys**. Create the default pair if the project does not already have them.
-
-## Put each key in the correct place
-
-| MemeOS setting | Supabase value | Where it goes |
+| Name | Value | Type |
 |---|---|---|
-| `VITE_SUPABASE_URL` | Project URL | Cloudflare build variable / `.env.local` |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_...` | Cloudflare build variable / `.env.local` |
-| `SUPABASE_URL` | Project URL | Worker runtime variable (`wrangler.toml`) |
-| `SUPABASE_SECRET_KEY` | `sb_secret_...` | Cloudflare Worker secret only |
+| `SUPABASE_URL` | Your project URL | Text variable |
+| `SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_...` | Text variable (public) |
 
-Never use the secret key in a `VITE_` variable, browser code, GitHub, or the Render service. The Render service only needs the Supabase project URL to validate signed audio URLs; it does not need a Supabase API key.
+The browser loads these from the same-origin `/api/public-config` endpoint at runtime. This works with a dashboard-uploaded Worker and does not depend on Vite build variables. The endpoint returns only the project URL and publishable key.
 
-## Important request-header behavior
+## Cloudflare Worker secrets
 
-The new publishable and secret keys are not JWTs. Worker REST and Storage admin calls send the secret key in the `apikey` header and do not send it as `Authorization: Bearer`. For a signed-in user check, the Worker sends `apikey: <secret key>` and `Authorization: Bearer <user access token>`.
+| Name | Value | Type |
+|---|---|---|
+| `SUPABASE_SECRET_KEY` | `sb_secret_...` | Secret |
+| `CREDENTIALS_ENCRYPTION_KEY` | Base64-encoded 32-byte key | Secret |
 
-## Official reference
+The secret key is only used server-side in the `apikey` header. It is never sent to the browser and is not a JWT, so do not put it in `Authorization: Bearer`. For user-specific authentication, MemeOS sends the user's Supabase access token in `Authorization: Bearer`.
 
-https://supabase.com/docs/guides/getting-started/migrating-to-new-api-keys
+Optional build-time fallback variables are `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`; they are not required when the Worker runtime variables are configured.
+
+Official migration guide: https://supabase.com/docs/guides/getting-started/migrating-to-new-api-keys

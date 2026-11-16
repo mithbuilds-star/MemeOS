@@ -56,7 +56,7 @@ The Worker serves the built React app and `/api/*` endpoints. It uses Supabase f
 1. Install dependencies: `npm install`.
 2. Create a Supabase project.
 3. In Supabase SQL Editor, run all seven migrations in order (see Database migrations above).
-4. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
+4. Optionally copy `.env.example` to `.env.local`. For Cloudflare, the frontend reads Supabase public configuration from `/api/public-config` at runtime.
 5. Start the frontend with `npm run dev`.
 6. Create an account using the sign-up link on the login screen.
 
@@ -77,7 +77,7 @@ openssl rand -base64 32
 
 Paste the generated value when Wrangler prompts for the secret. Keep it private and back it up securely: losing it makes previously stored provider keys impossible to decrypt. Do not rotate it without first migrating/re-encrypting stored keys.
 
-Set `SUPABASE_URL` in `wrangler.toml`, then run:
+Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` as Cloudflare Worker runtime variables. Set `SUPABASE_SECRET_KEY` and `CREDENTIALS_ENCRYPTION_KEY` as Worker secrets. The Worker exposes only the URL and publishable key at `/api/public-config`; the secret key is never exposed. Then run:
 
 ```bash
 npm run build
@@ -113,7 +113,7 @@ Only the encryption key and Supabase secret key remain Worker secrets. Individua
 
 This project uses Supabase's current **publishable** and **secret** API keys. Do not use the legacy `anon` or `service_role` JWT keys. Supabase is deprecating those legacy keys; the current keys are `sb_publishable_...` for browser code and `sb_secret_...` for the Worker.
 
-- Frontend build variable: `VITE_SUPABASE_PUBLISHABLE_KEY` (publishable key only).
+- Preferred frontend configuration: Worker runtime variable `SUPABASE_PUBLISHABLE_KEY`, returned by `/api/public-config`. Optional build-time fallback: `VITE_SUPABASE_PUBLISHABLE_KEY`.
 - Cloudflare Worker secret: `SUPABASE_SECRET_KEY` (secret key only).
 - Worker REST and Storage requests send the secret key in the `apikey` header only. It is not a JWT and must not be copied into `Authorization: Bearer`.
 - When validating a signed-in user, the Worker sends the secret key in `apikey` and the user's Supabase access token in `Authorization: Bearer`.
@@ -163,7 +163,7 @@ All API routes require a valid Supabase access token. The Worker validates the u
 1. Push this repository to GitHub.
 2. Connect the repository to Cloudflare Workers Builds or deploy with Wrangler.
 3. Set the two infrastructure secrets above.
-4. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` as build environment variables.
+4. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` as Worker runtime variables; the frontend loads them from `/api/public-config`.
 5. Apply all seven Supabase migrations in order.
 6. Deploy. Then sign in and add provider keys in Settings → API Manager.
 
@@ -221,8 +221,3 @@ Health check: `GET /health`. Authenticated render: `POST /render` with `x-render
 - Analytics sync reads the published media fields Meta returns and attempts the `reach` media insight. It stores daily snapshots and does not synthesize unavailable metrics.
 - Scheduled publishing uses a database lease. If a worker crashes after a publish attempt begins, the assignment is moved to `needs_review` after lease expiry instead of blindly publishing again.
 - Groq classification uses `openai/gpt-oss-20b`; the previous `llama-3.3-70b-versatile` model was deprecated for developer-tier use on 2026-08-16.
-
-
-### Render service browser checks
-
-After deploying the `render-service` Docker service, open the service base URL. `GET /` returns a JSON running-status response, and `GET /health` (also `/healthz`) returns a health response. `POST /render` is the authenticated rendering endpoint; opening it in a browser is not expected to work because it requires a POST request and `x-render-token`. In Render, set the Root Directory to `MemeOS-V1/render-service` if the repository contains the enclosing `MemeOS-V1` folder, or `render-service` if its contents are at the repository root. Set Health Check Path to `/health`.
