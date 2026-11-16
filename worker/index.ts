@@ -305,7 +305,8 @@ async function runBackgroundProcessing(env:Env){
 
 async function runWaitingReels(env:Env){
   const now=new Date().toISOString();
-  await db(env,"memes",`?reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(now)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:"The GitHub render did not report back within 30 minutes. Press Retry to render again."})});
+  // A render that never reported back within 30 minutes is discarded.
+  await db(env,"memes",`?reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(now)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_status:"rejected",classification:"rejected",classification_reason:"Discarded: the GitHub render did not report back within 30 minutes.",processing_error:"Discarded: the GitHub render did not report back within 30 minutes."})});
   const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status&order=created_at.asc&limit=10";
   const auto=await db(env,"memes",`?reel_status=eq.renderer_not_configured&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(now)})${sel}`);
   const manual=await db(env,"memes",`?reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(now)}${sel}`);
