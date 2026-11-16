@@ -214,8 +214,9 @@ export function Pipeline() {
     {error&&<Notice kind="error">{error}</Notice>}
     {message&&<Notice kind="info">{message}</Notice>}
     <div className="panel">
-      <div className="panel-head"><div><h3>Progress</h3><p>Share of all items that have reached each step.</p></div><span className={`state ${rendererOk?"ok":"pending"}`}><i/>Renderer: {data?.renderer||"checking"}</span></div>
-      {stages.map((s:any)=>{const pct=s.total?Math.round(s.count/s.total*100):0;return <div key={s.label} style={{marginBottom:14}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><b>{s.label}</b><span>{s.count} of {s.total} ({pct}%)</span></div><div style={bar}><div style={{width:`${pct}%`,height:"100%",background:"#7c3aed",transition:"width .4s"}}/></div></div>})}
+      <div className="panel-head"><div><h3>Progress</h3><p>Items being processed right now.</p></div><span className={`state ${rendererOk?"ok":"pending"}`}><i/>Renderer: {data?.renderer||"checking"}</span></div>
+      {running.length===0?<p style={{margin:"8px 0 14px",opacity:.7}}>Nothing is running right now.</p>:running.map((m:any)=><div key={m.id} style={{marginBottom:14}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><b>{who(m)}</b><span>{m.step}</span></div><div style={bar}><div style={{width:"40%",height:"100%",background:"#7c3aed",borderRadius:6,animation:"memeos-slide 1.2s ease-in-out infinite"}}/></div></div>)}
+      <style>{`@keyframes memeos-slide{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}`}</style>
       <div className="inline-form"><button className="btn primary" onClick={retryAll} disabled={busy==="all"}>{busy==="all"?<Loader2 className="spin" size={14}/>:<RefreshCw size={14}/>} Retry all stuck items</button><button className="btn secondary" onClick={load}><RefreshCw size={14}/> Refresh now</button></div>
     </div>
     <div className="panel" style={{marginTop:18}}>
