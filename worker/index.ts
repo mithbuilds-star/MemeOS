@@ -641,6 +641,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const memeId=processMatch[1];const rows=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("Meme not found.",404);
     const meme=rows[0];const next=meme.classification==="suitable"&&meme.extracted_text?"ready_for_asset":meme.extracted_text?"ocr_complete":"needs_ocr";
     const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_status:next,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null})});
+    // Reprocessing produces a new image, so every destination goes back to the approval queue.
+    await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}`,{method:"PATCH",body:JSON.stringify({approval_status:"pending",status:"pending",scheduled_at:null,publishing_locked_until:null,rejection_reason:"Reprocessed; approval reset."})});
     return json({queued:true,processing_status:updated?.[0]?.processing_status||next});
   }
   const classifyMatch=p.match(/^\/memes\/([0-9a-f-]+)\/classify$/);
