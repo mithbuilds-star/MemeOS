@@ -221,3 +221,8 @@ Health check: `GET /health`. Authenticated render: `POST /render` with `x-render
 - Analytics sync reads the published media fields Meta returns and attempts the `reach` media insight. It stores daily snapshots and does not synthesize unavailable metrics.
 - Scheduled publishing uses a database lease. If a worker crashes after a publish attempt begins, the assignment is moved to `needs_review` after lease expiry instead of blindly publishing again.
 - Groq classification uses `openai/gpt-oss-20b`; the previous `llama-3.3-70b-versatile` model was deprecated for developer-tier use on 2026-08-16.
+
+
+### Render service browser checks
+
+After deploying the `render-service` Docker service, open the service base URL. `GET /` returns a JSON running-status response, and `GET /health` (also `/healthz`) returns a health response. `POST /render` is the authenticated rendering endpoint; opening it in a browser is not expected to work because it requires a POST request and `x-render-token`. In Render, set the Root Directory to `MemeOS-V1/render-service` if the repository contains the enclosing `MemeOS-V1` folder, or `render-service` if its contents are at the repository root. Set Health Check Path to `/health`.
