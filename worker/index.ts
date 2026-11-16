@@ -425,7 +425,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const [a,m,q,pub] = await Promise.all([
       db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id`),
       db(env,"memes",`?${userFilter(ctx)}&select=id`),
-      db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.pending&select=id`),
+      db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.pending&select=id,memes!inner(processing_status,classification)&memes.processing_status=eq.generated&memes.classification=neq.rejected`),
       db(env,"publishing_history",`?${userFilter(ctx)}&status=eq.published&select=id`)
     ]);
     return json({ accounts:a.length, memes:m.length, pending:q.length, published:pub.length });
