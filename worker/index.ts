@@ -422,13 +422,14 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const body = method === "GET" || method === "DELETE" ? {} : await req.json().catch(() => ({})) as any;
 
   if (p === "/overview" && method === "GET") {
-    const [a,m,q,pub] = await Promise.all([
+    const [a,m,q,pub,sched] = await Promise.all([
       db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id`),
       db(env,"memes",`?${userFilter(ctx)}&select=id`),
       db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.pending&select=id,memes!inner(processing_status,classification)&memes.processing_status=eq.generated&memes.classification=neq.rejected`),
-      db(env,"publishing_history",`?${userFilter(ctx)}&status=eq.published&select=id`)
+      db(env,"publishing_history",`?${userFilter(ctx)}&status=eq.published&select=id`),
+      db(env,"account_meme_assignments",`?${userFilter(ctx)}&status=eq.scheduled&select=id`)
     ]);
-    return json({ accounts:a.length, memes:m.length, pending:q.length, published:pub.length });
+    return json({ accounts:a.length, memes:m.length, pending:q.length, published:pub.length, scheduled:sched.length });
   }
   if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=*&order=created_at.desc`) });
   if (p === "/accounts" && method === "POST") {
