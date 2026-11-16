@@ -10,7 +10,7 @@ not_found_handling = "single-page-application"
 
 [vars]
 APP_ENV = "production"
-SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+SUPABASE_URL = "https://brlqdwnpoamvfuhdpdtx.supabase.co"
 META_GRAPH_VERSION = "v27.0"
 # Set RENDER_SERVICE_URL as a Worker runtime variable after deploying render-service.
 
