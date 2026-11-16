@@ -70,11 +70,13 @@ async function centreOffset(frame) {
   // Measure the text inside that box, using the box colour as the background.
   let tMinX = minX, tMinY = minY, tMaxX = maxX, tMaxY = maxY;
   if (w * h > W * H * 0.5) {
-    const k = (minY + 2) * W * 3 + (minX + 2) * 3;
+    // Ignore the outer 16px of the box (its edge/border), and sample the box colour inside it.
+    const IN = 16;
+    const k = (minY + IN) * W * 3 + (minX + IN) * 3;
     const IR = raw[k], IG = raw[k + 1], IB = raw[k + 2];
     tMinX = W; tMinY = H; tMaxX = -1; tMaxY = -1;
-    for (let y = minY; y <= maxY; y++) {
-      for (let x = minX; x <= maxX; x++) {
+    for (let y = minY + IN; y <= maxY - IN; y++) {
+      for (let x = minX + IN; x <= maxX - IN; x++) {
         const i = (y * W + x) * 3;
         if (Math.abs(raw[i] - IR) + Math.abs(raw[i + 1] - IG) + Math.abs(raw[i + 2] - IB) > TOL) {
           if (x < tMinX) tMinX = x;
