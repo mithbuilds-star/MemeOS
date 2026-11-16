@@ -41,7 +41,7 @@ function run(args) {
 // Finds the BRAT box and the text inside it. Returns the box rectangle, its colour, and the shift that centres the text.
 async function centreOffset(frame) {
   const raw = await new Promise((resolve, reject) => {
-    const p = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', frame, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+    const p = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', frame, '-vf', `scale=${W}:${H}:flags=lanczos`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
     const chunks = [];
     p.stdout.on('data', (d) => chunks.push(d));
     p.stderr.on('data', () => {});
@@ -195,7 +195,7 @@ async function main() {
     if (c.mode === 'box') {
       const P = Math.max(Math.abs(c.ox), Math.abs(c.oy), 0);
       const hex = c.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
-      const vf = `crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${W + 2 * P}:${H + 2 * P}:${P + c.ox}:${P + c.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},format=rgb24`;
+      const vf = `scale=${W}:${H}:flags=lanczos,crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${W + 2 * P}:${H + 2 * P}:${P + c.ox}:${P + c.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},format=rgb24`;
       await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', vf, '-frames:v', '1', poster]);
     } else {
       await copyFile(finalFrame, poster);
