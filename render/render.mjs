@@ -17,7 +17,9 @@ const KEY = env.SUPABASE_SECRET_KEY || '';
 const MEME_ID = env.MEME_ID || '';
 const OWNER_ID = env.OWNER_ID || '';
 const W = 1080;
-const H = 1080; // 1:1 square output
+const H = 1080; // 1:1 BRAT square
+const REEL_W = 1080;
+const REEL_H = 1920; // Reels are 9:16; the square sits in the middle on black
 const MAX_AUDIO_BYTES = 30 * 1024 * 1024;
 
 function requireEnv() {
@@ -72,11 +74,14 @@ async function centreOffset(frame) {
   const k = (outer.y + IN) * W * 3 + (outer.x + IN) * 3;
   const box = { x: outer.x, y: outer.y, w: outer.w, h: outer.h, colour: [raw[k], raw[k + 1], raw[k + 2]] };
   const text = bbox(outer.x + IN, outer.y + IN, outer.x + outer.w - 1 - IN, outer.y + outer.h - 1 - IN, ...box.colour);
-  if (!text) return { mode: 'box', ...box, dx: 0, dy: 0 };
-  const dx = Math.round((box.w - text.w) / 2 - (text.x - box.x));
-  const dy = Math.round((box.h - text.h) / 2 - (text.y - box.y));
-  console.log('Centre measure', { box: { x: box.x, y: box.y, w: box.w, h: box.h, colour: box.colour }, text: { w: text.w, h: text.h }, offset: { dx, dy } });
-  return { mode: 'box', ...box, dx, dy };
+  if (!text) return { mode: 'box', ...box, ox: 0, oy: 0 };
+  // Text centre relative to the box, then where the box must go so that centre lands on the square's centre.
+  const tcx = (text.x - box.x) + text.w / 2;
+  const tcy = (text.y - box.y) + text.h / 2;
+  const ox = Math.round(W / 2 - tcx);
+  const oy = Math.round(H / 2 - tcy);
+  console.log('Centre measure', { box: { x: box.x, y: box.y, w: box.w, h: box.h, colour: box.colour }, text: { w: text.w, h: text.h }, box_position: { ox, oy } });
+  return { mode: 'box', ...box, ox, oy };
 }
 
 // The render job signs the song itself with its server-side key, so no signed URL is passed through workflow inputs.
@@ -161,7 +166,7 @@ async function main() {
 
     const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', source];
     if (audioPath) args.push('-stream_loop', '-1', '-i', audioPath);
-    args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},scale=${W}:${H}:flags=lanczos,format=yuv420p`, '-map', '0:v:0');
+    args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},pad=${REEL_W}:${REEL_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`, '-map', '0:v:0');
     if (audioPath) args.push('-map', '1:a:0');
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '14', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
     if (audioPath) args.push('-c:a', 'aac', '-b:a', '160k', '-shortest');
@@ -170,15 +175,15 @@ async function main() {
 
     // Photo post = the literal last frame of the finished MP4.
     // Decode the last second and keep overwriting one file; the file left behind is the true last frame.
-    await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', finalVideo, '-update', '1', '-q:v', '1', finalFrame]);
+    await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', source, '-update', '1', '-q:v', '1', finalFrame]);
     if (!(await stat(finalFrame).catch(() => null))) throw new Error('Could not extract the last frame from the rendered video.');
     // Photo = the last frame, shifted so the text sits in the exact centre of the square, on the same green.
-    // Photo: crop to the BRAT box (no outer outline), move the text to the box's exact centre, and fill the square.
+    // Photo: the same 1:1 frame, uniform box colour, text exactly centred. No outline and no resize.
     const c = await centreOffset(finalFrame);
     if (c.mode === 'box') {
-      const P = Math.max(Math.abs(c.dx), Math.abs(c.dy));
+      const P = Math.max(Math.abs(c.ox), Math.abs(c.oy), 0);
       const hex = c.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
-      const vf = `crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${c.w + 2 * P}:${c.h + 2 * P}:${P + c.dx}:${P + c.dy}:color=0x${hex},crop=${c.w}:${c.h}:${P}:${P},format=rgb24`; // native box size, no upscaling (keeps the text sharp)
+      const vf = `crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${W + 2 * P}:${H + 2 * P}:${P + c.ox}:${P + c.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},format=rgb24`;
       await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', vf, '-frames:v', '1', poster]);
     } else {
       await copyFile(finalFrame, poster);
