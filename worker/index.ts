@@ -515,8 +515,10 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
     const decision=body.decision;
     if(!["approved","rejected"].includes(decision))return fail("Decision must be approved or rejected.");
-    const publishFormat=body.publish_format||"photo";if(!["photo","reel"].includes(publishFormat))return fail("publish_format must be photo or reel.");
+    let publishFormat=body.publish_format||"auto";if(!["photo","reel","auto"].includes(publishFormat))return fail("publish_format must be photo, reel or auto.");
     const memeReady=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,asset_url,reel_status,reel_asset_url,reel_song_id`);const ready=memeReady[0];
+    // auto: about 30% of approved memes become Reels (when a Reel with a song exists), the rest are photo posts.
+    if(publishFormat==="auto"){const reelReady=ready?.reel_status==="generated"&&!!ready?.reel_asset_url&&!!ready?.reel_song_id;publishFormat=reelReady&&Math.random()<0.3?"reel":"photo";}
     if(decision==="approved"&&publishFormat==="photo"&&(ready?.processing_status!=="generated"||!ready?.asset_url))return fail("The BRAT final-frame photo asset is not ready yet.",409);
     if(decision==="approved"&&publishFormat==="reel"&&(ready?.reel_status!=="generated"||!ready?.reel_asset_url||!ready?.reel_song_id))return fail("The Reel and selected song are not ready yet.",409);
     if(body.account_id){
