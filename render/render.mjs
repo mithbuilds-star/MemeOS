@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, stat, copyFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -36,8 +36,7 @@ function run(args) {
   });
 }
 
-// Finds the text's bounding box in the last frame and returns the shift that centres it in the square.
-// ffmpeg outputs raw RGB pixels; any pixel that is not the brand green counts as text.
+// Finds the BRAT box and the text inside it. Returns the box rectangle, its colour, and the shift that centres the text.
 async function centreOffset(frame) {
   const raw = await new Promise((resolve, reject) => {
     const p = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', frame, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
@@ -47,54 +46,37 @@ async function centreOffset(frame) {
     p.on('error', reject);
     p.on('close', (code) => (code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`Could not read frame pixels (${code}).`))));
   });
-  if (raw.length !== W * H * 3) return { dx: 0, dy: 0 };
-  // The background is whatever colour the corner is, so a slightly different green still works.
-  const BR = raw[0], BG = raw[1], BB = raw[2];
+  if (raw.length !== W * H * 3) return { mode: 'none' };
   const TOL = 60;
-  let minX = W, minY = H, maxX = -1, maxY = -1;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 3;
-      if (Math.abs(raw[i] - BR) + Math.abs(raw[i + 1] - BG) + Math.abs(raw[i + 2] - BB) > TOL) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-  if (maxX < 0) return { dx: 0, dy: 0 };
-  let w = maxX - minX + 1;
-  let h = maxY - minY + 1;
-  // The first pass finds the BRAT box (a slightly different green than the outer background).
-  // Measure the text inside that box, using the box colour as the background.
-  let tMinX = minX, tMinY = minY, tMaxX = maxX, tMaxY = maxY;
-  if (w * h > W * H * 0.5) {
-    // Ignore the outer 16px of the box (its edge/border), and sample the box colour inside it.
-    const IN = 16;
-    const k = (minY + IN) * W * 3 + (minX + IN) * 3;
-    const IR = raw[k], IG = raw[k + 1], IB = raw[k + 2];
-    tMinX = W; tMinY = H; tMaxX = -1; tMaxY = -1;
-    for (let y = minY + IN; y <= maxY - IN; y++) {
-      for (let x = minX + IN; x <= maxX - IN; x++) {
+  const bbox = (x0, y0, x1, y1, R, G, B) => {
+    let mnX = W, mnY = H, mxX = -1, mxY = -1;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
         const i = (y * W + x) * 3;
-        if (Math.abs(raw[i] - IR) + Math.abs(raw[i + 1] - IG) + Math.abs(raw[i + 2] - IB) > TOL) {
-          if (x < tMinX) tMinX = x;
-          if (x > tMaxX) tMaxX = x;
-          if (y < tMinY) tMinY = y;
-          if (y > tMaxY) tMaxY = y;
+        if (Math.abs(raw[i] - R) + Math.abs(raw[i + 1] - G) + Math.abs(raw[i + 2] - B) > TOL) {
+          if (x < mnX) mnX = x;
+          if (x > mxX) mxX = x;
+          if (y < mnY) mnY = y;
+          if (y > mxY) mxY = y;
         }
       }
     }
-    if (tMaxX < 0) return { dx: 0, dy: 0 };
-    w = tMaxX - tMinX + 1;
-    h = tMaxY - tMinY + 1;
-  }
-  const offset = { dx: Math.round((W - w) / 2 - tMinX), dy: Math.round((H - h) / 2 - tMinY) };
-  console.log('Centre measure', { outer: [BR, BG, BB], text: { minX: tMinX, minY: tMinY, w, h }, offset });
-  // Safety: if the text still covers almost the whole frame, do not shift.
-  if (w * h > W * H * 0.9) return { dx: 0, dy: 0 };
-  return offset;
+    return mxX < 0 ? null : { x: mnX, y: mnY, w: mxX - mnX + 1, h: mxY - mnY + 1 };
+  };
+  // 1) The BRAT box: anything that differs from the outer background (the corner colour).
+  const outer = bbox(0, 0, W - 1, H - 1, raw[0], raw[1], raw[2]);
+  if (!outer) return { mode: 'none' };
+  if (outer.w * outer.h < W * H * 0.5) return { mode: 'none' };
+  // 2) The text inside the box: sample the box colour inside its border, then measure what differs from it.
+  const IN = 16;
+  const k = (outer.y + IN) * W * 3 + (outer.x + IN) * 3;
+  const box = { x: outer.x, y: outer.y, w: outer.w, h: outer.h, colour: [raw[k], raw[k + 1], raw[k + 2]] };
+  const text = bbox(outer.x + IN, outer.y + IN, outer.x + outer.w - 1 - IN, outer.y + outer.h - 1 - IN, ...box.colour);
+  if (!text) return { mode: 'box', ...box, dx: 0, dy: 0 };
+  const dx = Math.round((box.w - text.w) / 2 - (text.x - box.x));
+  const dy = Math.round((box.h - text.h) / 2 - (text.y - box.y));
+  console.log('Centre measure', { box: { x: box.x, y: box.y, w: box.w, h: box.h, colour: box.colour }, text: { w: text.w, h: text.h }, offset: { dx, dy } });
+  return { mode: 'box', ...box, dx, dy };
 }
 
 async function patchMeme(patch) {
@@ -173,9 +155,16 @@ async function main() {
     await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', finalVideo, '-update', '1', '-q:v', '1', finalFrame]);
     if (!(await stat(finalFrame).catch(() => null))) throw new Error('Could not extract the last frame from the rendered video.');
     // Photo = the last frame, shifted so the text sits in the exact centre of the square, on the same green.
-    const { dx, dy } = await centreOffset(finalFrame);
-    await run(['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=c=0xB7FF3C:s=${W}x${H}`, '-i', finalFrame,
-      '-filter_complex', `[0:v][1:v]overlay=x=${dx}:y=${dy}:format=auto,format=rgb24`, '-frames:v', '1', poster]);
+    // Photo: crop to the BRAT box (no outer outline), move the text to the box's exact centre, and fill the square.
+    const c = await centreOffset(finalFrame);
+    if (c.mode === 'box') {
+      const P = Math.max(Math.abs(c.dx), Math.abs(c.dy));
+      const hex = c.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
+      const vf = `crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${c.w + 2 * P}:${c.h + 2 * P}:${P + c.dx}:${P + c.dy}:color=0x${hex},crop=${c.w}:${c.h}:${P}:${P},scale=${W}:${H}:flags=lanczos,format=rgb24`;
+      await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', vf, '-frames:v', '1', poster]);
+    } else {
+      await copyFile(finalFrame, poster);
+    }
 
     const videoBytes = await readFile(finalVideo);
     const posterBytes = await readFile(poster);
