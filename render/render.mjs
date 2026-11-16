@@ -164,6 +164,16 @@ async function main() {
       brat: { W, H, BOX_W: 960, BOX_H: 960, BOX_PAD: 60, C_BG: '#b7ff3c', C_TEXT: '#111111', FONT_NAME: 'Arimo', FONT_WEIGHT: 700, fontPaths: [path.join(__dirname, 'fonts', 'Arimo-Bold.ttf')] },
     });
     await writeFile(source, generated);
+    // Measure the BRAT box once from the final square frame; the reel and the photo use the same crop.
+    await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', source, '-update', '1', '-q:v', '1', path.join(dir, 'measure.png')]);
+    const measured = await centreOffset(path.join(dir, 'measure.png'));
+    const squareFilter = measured.mode === 'box'
+      ? (() => {
+          const P = Math.max(Math.abs(measured.ox), Math.abs(measured.oy));
+          const hex = measured.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
+          return `crop=${measured.w}:${measured.h}:${measured.x}:${measured.y},pad=${W + 2 * P}:${H + 2 * P}:${P + measured.ox}:${P + measured.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},scale=${REEL_W}:${REEL_W}:flags=lanczos`;
+        })()
+      : `scale=${REEL_W}:${REEL_W}:flags=lanczos`;
 
     let audioPath = '';
     if (audioUrl) {
@@ -178,7 +188,7 @@ async function main() {
 
     const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', source];
     if (audioPath) args.push('-stream_loop', '-1', '-i', audioPath);
-    args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},scale=${REEL_W}:${REEL_W}:flags=lanczos,pad=${REEL_W}:${REEL_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`, '-map', '0:v:0');
+    args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},${squareFilter},pad=${REEL_W}:${REEL_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`, '-map', '0:v:0');
     if (audioPath) args.push('-map', '1:a:0');
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '14', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
     if (audioPath) args.push('-c:a', 'aac', '-b:a', '160k', '-shortest');
