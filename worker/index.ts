@@ -555,6 +555,45 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(body.scheduled_at===null){patch.scheduled_at=null;patch.status="pending";}
     const updated=await db(env,"account_meme_assignments",`?id=eq.${assignmentMatch[1]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});return json({assignment:updated?.[0]});
   }
+  if (p === "/pipeline" && method === "GET") {
+    const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&select=id,processing_status,reel_status,processing_error,processing_attempts,classification,extracted_text,source_username,created_at,processing_next_retry_at&order=created_at.desc&limit=500`);
+    const processing: Record<string, number> = {};
+    const reel: Record<string, number> = {};
+    for (const r of rows) {
+      const ps = r.processing_status || "unknown";
+      processing[ps] = (processing[ps] || 0) + 1;
+      if (r.reel_status) reel[r.reel_status] = (reel[r.reel_status] || 0) + 1;
+    }
+    const items = rows.filter((r) =>
+      !["generated", "rejected", "media_unavailable"].includes(r.processing_status || "") ||
+      ["render_failed", "renderer_not_configured"].includes(r.reel_status || "")
+    ).slice(0, 200);
+    let renderer = "not_configured";
+    if (env.RENDER_SERVICE_URL) {
+      try {
+        const h = await fetch(`${env.RENDER_SERVICE_URL.replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(8000) });
+        renderer = h.ok ? "ready" : `http_${h.status}`;
+      } catch { renderer = "unreachable"; }
+    }
+    return json({ counts: { processing, reel }, renderer, items });
+  }
+  if (p === "/pipeline/retry" && method === "POST") {
+    // Requeue every stuck item in one pass, choosing the correct stage for each row.
+    const reset = { processing_attempts: 0, processing_error: null, processing_next_retry_at: null, processing_locked_until: null, reel_render_locked_until: null, reel_render_next_retry_at: null };
+    const stuck = "(needs_ocr,ocr_complete,ready_for_asset,processing_failed)";
+    const groups = [
+      { filter: `processing_status=in.${stuck}&extracted_text=is.null`, status: "needs_ocr" },
+      { filter: `processing_status=in.${stuck}&extracted_text=not.is.null&classification=eq.suitable`, status: "ready_for_asset" },
+      { filter: `processing_status=in.${stuck}&extracted_text=not.is.null&classification=neq.suitable`, status: "ocr_complete" },
+    ];
+    let requeued = 0;
+    for (const g of groups) {
+      const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{ method: "PATCH", body: JSON.stringify({ ...reset, processing_status: g.status }) });
+      requeued += rows.length;
+    }
+    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_render_locked_until: null, reel_render_next_retry_at: null, processing_error: null }) });
+    return json({ requeued, reel_requeued: reelRows.length });
+  }
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}
   const processMatch=p.match(/^\/memes\/([0-9a-f-]+)\/process$/);
   if(processMatch&&method==="POST"){

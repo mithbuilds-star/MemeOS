@@ -182,3 +182,31 @@ export function SettingsPage() {
     </div>
   </>;
 }
+
+export function Pipeline() {
+  const [data,setData]=useState<any>(null);const [error,setError]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState("");
+  const load=()=>api("/pipeline").then(setData).catch(e=>setError(e.message));
+  useEffect(()=>{load();const t=setInterval(load,15000);return ()=>clearInterval(t)},[]);
+  const retryAll=async()=>{setBusy("all");setMessage("");try{const r=await api("/pipeline/retry",{method:"POST",body:"{}"});setMessage(`Requeued ${r.requeued} item(s) and ${r.reel_requeued} reel render(s). The backend picks them up on the next cron run.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
+  const retryOne=async(id:string)=>{setBusy(id);setMessage("");try{const r=await api(`/memes/${id}/process`,{method:"POST",body:"{}"});setMessage(`Queued ${id.slice(0,8)} at ${r.processing_status}.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
+  const counts=data?.counts||{processing:{},reel:{}};
+  const rendererOk=data?.renderer==="ready";
+  return <>
+    <PageHead eyebrow="OPERATIONS" title="Pipeline" desc="Live status of OCR, classification and BRAT rendering. Refreshes every 15 seconds."/>
+    {error&&<Notice kind="error">{error}</Notice>}
+    {message&&<Notice kind="info">{message}</Notice>}
+    <div className="panel">
+      <div className="panel-head"><div><h3>Renderer</h3><p>Connection to the BRAT render service.</p></div><span className={`state ${rendererOk?"ok":"pending"}`}><i/>{data?.renderer||"checking"}</span></div>
+      <div className="inline-form"><button className="btn primary" onClick={retryAll} disabled={busy==="all"}>{busy==="all"?<Loader2 className="spin" size={14}/>:<RefreshCw size={14}/>} Retry all stuck items</button><button className="btn secondary" onClick={load}><RefreshCw size={14}/> Refresh now</button></div>
+    </div>
+    <div className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><div><h3>Processing stages</h3><p>How many items are in each stage.</p></div></div>
+      <div className="status-list">{Object.entries(counts.processing).map(([k,v]:any)=><div key={k}><span>{k}</span><b>{v}</b></div>)}{Object.keys(counts.processing).length===0&&<small>No items yet.</small>}</div>
+      <div className="status-list" style={{marginTop:12}}>{Object.entries(counts.reel).map(([k,v]:any)=><div key={"r"+k}><span>reel: {k}</span><b>{v}</b></div>)}</div>
+    </div>
+    <div className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><div><h3>Stuck and failed items</h3><p>Each item's latest error. Retry a single item or all of them.</p></div><span className="tag">{data?.items?.length??0} ITEMS</span></div>
+      {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>LATEST ERROR</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{m.source_username?`@${m.source_username}`:"Manual"}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small className="error-text">{m.processing_error||"—"}</small></td><td>{m.processing_attempts??0}</td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button></td></tr>)}</tbody></table></div>}
+    </div>
+  </>;
+}

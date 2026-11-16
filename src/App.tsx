@@ -7,14 +7,14 @@ import {
   Workflow, X
 } from "lucide-react";
 import { initializeSupabase, supabase } from "./lib/supabase";
-import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login } from "./pages";
+import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline } from "./pages";
 
 const nav = [
   ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users],
   ["Discovery", "/discovery", Compass], ["Approval Queue", "/queue", CheckCheck],
   ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage], ["Meme Creator", "/creator", Clapperboard],
   ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow],
-  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity],
+  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity], ["Pipeline", "/pipeline", Activity],
   ["Settings", "/settings", Settings]
 ] as const;
 
@@ -100,7 +100,7 @@ export default function App() {
         <Route path="/discovery" element={<Discovery/>}/><Route path="/queue" element={<Queue/>}/>
         <Route path="/library" element={<Library/>}/><Route path="/songs" element={<SongLibrary/>}/><Route path="/creator" element={<Creator/>}/>
         <Route path="/scheduler" element={<Scheduler/>}/><Route path="/publishing" element={<Publishing/>}/>
-        <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/>
+        <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/><Route path="/pipeline" element={<Pipeline/>}/>
         <Route path="/settings" element={<SettingsPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes></div>
     </main>
