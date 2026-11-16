@@ -75,7 +75,7 @@ async function decryptSecret(env: Env, row: any): Promise<string> {
   return new TextDecoder().decode(plain);
 }
 function credentialView(row: any) {
-  return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||null,enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at};
+  return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null),enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at};
 }
 
 function userFilter(ctx: Ctx) { return `owner_id=eq.${encodeURIComponent(ctx.userId)}`; }
@@ -329,7 +329,8 @@ async function runWaitingReels(env:Env){
   }
 }
 
-function buildActorInput(template:any,usernames:string[]){
+const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
+function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR){
   const input=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
   const replace=(value:any):any=>{
     if(typeof value==="string"){if(value==="{{usernames}}")return usernames;if(value==="{{profile_urls}}")return usernames.map(u=>`https://www.instagram.com/${u.replace(/^@/,"")}/`);if(value==="{{start_urls}}")return usernames.map(u=>({url:`https://www.instagram.com/${u.replace(/^@/,"")}/`}));return value;}
@@ -338,7 +339,15 @@ function buildActorInput(template:any,usernames:string[]){
     return value;
   };
   const result=replace(input);
-  if(!("usernames" in result)&&!("directUrls" in result)&&!("startUrls" in result))result.usernames=usernames;
+  // The recommended Apify-maintained Instagram Scraper expects profile URLs in directUrls.
+  // Convert the older MemeOS default `usernames` input so existing saved keys keep working.
+  if(actorId===DEFAULT_APIFY_ACTOR){
+    if(!Array.isArray(result.directUrls)){
+      const source=Array.isArray(result.usernames)?result.usernames:usernames;
+      result.directUrls=source.map((u:string)=>`https://www.instagram.com/${String(u).replace(/^@/,"")}/`);
+    }
+    delete result.usernames;
+  }else if(!("usernames" in result)&&!("directUrls" in result)&&!("startUrls" in result))result.usernames=usernames;
   if(!("resultsLimit" in result))result.resultsLimit=20;
   return result;
 }
@@ -396,7 +405,7 @@ async function runScheduledDiscovery(env:Env){
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
     if(settingsRows.length){const lock=await db(env,"user_settings",`?${userFilter(ctx)}&or=(discovery_lock_until.is.null,discovery_lock_until.lte.${encodeURIComponent(new Date().toISOString())})`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:lockUntil})});if(!lock?.length)continue;}else{try{await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,discovery_lock_until:lockUntil})});}catch{continue;}}
     let started:any=null,used:any=null;
-    for(const credential of creds){try{const secret=await decryptSecret(env,credential);const actor=encodeURIComponent(credential.actor_id||"");const input=buildActorInput(credential.actor_input,selected.map((s:any)=>s.username));const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});const data:any=await response.json().catch(()=>({}));if(response.ok){started=data;used=credential;break;}await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});}catch{}}
+    for(const credential of creds){try{const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const input=buildActorInput(credential.actor_input,selected.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR);const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});const data:any=await response.json().catch(()=>({}));if(response.ok){started=data;used=credential;break;}await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});}catch{}}
     if(!started?.data?.id){await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:null})});continue;}
     await db(env,"api_credentials",`?id=eq.${used.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
     await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ownerId,job_type:"discovery",status:"running",provider_run_id:started.data.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:started.data.defaultDatasetId,credential_id:used.id,actor_id:used.actor_id,source_usernames:selected.map((s:any)=>s.username),scheduled:true}})});
@@ -442,6 +451,12 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if (body.display_name !== undefined) allowed.display_name = String(body.display_name).slice(0,100);
     const rows = await db(env,"instagram_accounts",`?id=eq.${accountMatch[1]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(allowed)});
     return json({account:rows?.[0]});
+  }
+  if (accountMatch && method === "DELETE") {
+    if (!await owned(env,"instagram_accounts",accountMatch[1],ctx)) return fail("Destination account not found.",404);
+    // Foreign keys cascade account relationships, destination-source mappings and pending assignments.
+    await db(env,"instagram_accounts",`?id=eq.${accountMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});
+    return json({ok:true});
   }
   if (p === "/sources" && method === "GET") return json({sources:await db(env,"reference_accounts",`?${userFilter(ctx)}&select=*&order=created_at.desc`)});
   if (p === "/sources" && method === "POST") {
@@ -601,19 +616,19 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   }
   if(p==="/api-credentials"&&method==="GET"){
     const rows=await db(env,"api_credentials",`?${userFilter(ctx)}&select=id,provider,label,key_hint,actor_id,actor_input,enabled,status,last_tested_at,last_used_at,created_at&order=created_at.desc`);
-    return json({credentials:rows});
+    return json({credentials:rows.map((row:any)=>({...row,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null)}))});
   }
   if(p==="/api-credentials"&&method==="POST"){
     const provider=String(body.provider||"").toLowerCase();
     const label=String(body.label||"").trim().slice(0,60);
     const secret=String(body.secret||"").trim();
-    const actorId=String(body.actor_id||"").trim();
+    const actorId=String(body.actor_id|| (provider==="apify"?DEFAULT_APIFY_ACTOR:"")).trim();
     let actorInput:any={};try{actorInput=typeof body.actor_input==="string"?JSON.parse(body.actor_input||"{}"):body.actor_input||{};}catch{return fail("Actor input must be valid JSON.");}
     if(!actorInput||typeof actorInput!=="object"||Array.isArray(actorInput))return fail("Actor input must be a JSON object.");
     if(!["apify","groq"].includes(provider))return fail("Provider must be Apify or Groq.");
     if(!label)return fail("Give this key a name.");
     if(secret.length<12||secret.length>500)return fail("Enter a valid API key.");
-    if(provider==="apify"&&!actorId)return fail("Add the Apify Actor ID for this key.");
+    if(provider==="apify"&&!actorId)return fail("An Apify Actor ID is required.");
     const encrypted=await encryptSecret(env,secret);
     const rows=await db(env,"api_credentials","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,provider,label,key_hint:secret.slice(-4),actor_id:provider==="apify"?actorId:null,actor_input:provider==="apify"?actorInput:{},enabled:true,status:"untested",...encrypted})});
     return json({credential:credentialView(rows?.[0])},201);
@@ -669,7 +684,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     let started:any=null;let used:any=null;let lastError="No Apify key could start the run.";
     for(const credential of creds){
       try{
-        const secret=await decryptSecret(env,credential);const actor=encodeURIComponent(credential.actor_id||"");const input=buildActorInput(credential.actor_input,sources.map((s:any)=>s.username));
+        const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const input=buildActorInput(credential.actor_input,sources.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR);
         const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
         const result:any=await response.json().catch(()=>({}));
         if(response.ok){started=result;used=credential;break;}
