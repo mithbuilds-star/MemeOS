@@ -30,9 +30,7 @@ permissions:
   contents: read
 
 # One render at a time.
-concurrency:
-  group: render-meme
-  cancel-in-progress: false
+# No concurrency group: each render is independent. A shared group keeps only one pending run and cancels the rest.
 
 jobs:
   render:
