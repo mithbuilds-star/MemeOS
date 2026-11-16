@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -108,7 +108,9 @@ async function main() {
     await run(args);
 
     // Photo post = the literal last frame of the finished MP4.
-    await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-0.05', '-i', finalVideo, '-frames:v', '1', '-update', '1', finalFrame]);
+    // Decode the last second and keep overwriting one file; the file left behind is the true last frame.
+    await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', finalVideo, '-update', '1', '-q:v', '1', finalFrame]);
+    if (!(await stat(finalFrame).catch(() => null))) throw new Error('Could not extract the last frame from the rendered video.');
     await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', 'scale=500:900:force_original_aspect_ratio=decrease,pad=720:900:(ow-iw)/2:(oh-ih)/2:color=0xB7FF3C,format=rgb24', '-frames:v', '1', poster]);
 
     const videoBytes = await readFile(finalVideo);
