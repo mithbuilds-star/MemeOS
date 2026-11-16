@@ -178,7 +178,7 @@ async function main() {
 
     const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', source];
     if (audioPath) args.push('-stream_loop', '-1', '-i', audioPath);
-    args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},pad=${REEL_W}:${REEL_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`, '-map', '0:v:0');
+    args.push('-vf', `tpad=stop_mode=clone:stop_duration=${freeze},scale=${REEL_W}:${REEL_W}:flags=lanczos,pad=${REEL_W}:${REEL_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`, '-map', '0:v:0');
     if (audioPath) args.push('-map', '1:a:0');
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '14', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
     if (audioPath) args.push('-c:a', 'aac', '-b:a', '160k', '-shortest');
