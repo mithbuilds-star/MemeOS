@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, stat, copyFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,8 +16,8 @@ const SUPABASE_URL = (env.SUPABASE_URL || '').replace(/\/$/, '');
 const KEY = env.SUPABASE_SECRET_KEY || '';
 const MEME_ID = env.MEME_ID || '';
 const OWNER_ID = env.OWNER_ID || '';
-const W = 720;
-const H = 1280;
+const W = 1080;
+const H = 1080; // 1:1 square output
 const MAX_AUDIO_BYTES = 30 * 1024 * 1024;
 
 function requireEnv() {
@@ -83,7 +83,7 @@ async function main() {
       fast_progress: false,
       theme: 'brat',
       lyric: { maxWordPerLayer: 999, frameDuration: 0.24, lastFrameDuration: 0.001 },
-      brat: { W, H, BOX_W: 640, BOX_H: 1120, BOX_PAD: 40, C_BG: '#b7ff3c', C_TEXT: '#111111', FONT_NAME: 'Arimo', FONT_WEIGHT: 700, fontPaths: [path.join(__dirname, 'fonts', 'Arimo-Bold.ttf')] },
+      brat: { W, H, BOX_W: 960, BOX_H: 960, BOX_PAD: 60, C_BG: '#b7ff3c', C_TEXT: '#111111', FONT_NAME: 'Arimo', FONT_WEIGHT: 700, fontPaths: [path.join(__dirname, 'fonts', 'Arimo-Bold.ttf')] },
     });
     await writeFile(source, generated);
 
@@ -111,7 +111,8 @@ async function main() {
     // Decode the last second and keep overwriting one file; the file left behind is the true last frame.
     await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', finalVideo, '-update', '1', '-q:v', '1', finalFrame]);
     if (!(await stat(finalFrame).catch(() => null))) throw new Error('Could not extract the last frame from the rendered video.');
-    await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', 'scale=500:900:force_original_aspect_ratio=decrease,pad=720:900:(ow-iw)/2:(oh-ih)/2:color=0xB7FF3C,format=rgb24', '-frames:v', '1', poster]);
+    // Photo = the exact last frame, untouched (square, no padding), so it matches the video 1:1.
+    await copyFile(finalFrame, poster);
 
     const videoBytes = await readFile(finalVideo);
     const posterBytes = await readFile(poster);

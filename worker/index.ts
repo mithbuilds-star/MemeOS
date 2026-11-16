@@ -494,6 +494,14 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const rows=await db(env,"memes","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,extracted_text:text,classification:"suitable",classification_reason:"Manually created text. Sent to the BRAT video renderer.",processing_status:"ready_for_asset",reel_status:"not_started",source_type:"manual"})});
     return json({meme:rows?.[0]},201);
   }
+  const rejectMatch=p.match(/^\/memes\/([0-9a-f-]+)\/reject$/);
+  if(rejectMatch&&method==="POST"){
+    const memeId=rejectMatch[1];
+    if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
+    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({classification:"rejected",classification_reason:"Rejected by user in content library.",processing_status:"rejected",processing_locked_until:null,reel_status:"not_started",reel_render_locked_until:null,reel_render_next_retry_at:null})});
+    await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}`,{method:"PATCH",body:JSON.stringify({approval_status:"rejected",status:"rejected",scheduled_at:null,rejection_reason:"Rejected by user."})});
+    return json({meme:updated?.[0]});
+  }
   const approveMatch=p.match(/^\/memes\/([0-9a-f-]+)\/approve$/);
   if(approveMatch&&method==="POST"){
     const memeId=approveMatch[1];
