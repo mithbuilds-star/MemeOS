@@ -1,0 +1,65 @@
+name: render-meme
+
+on:
+  workflow_dispatch:
+    inputs:
+      meme_id:
+        description: Meme row id
+        required: true
+        type: string
+      owner_id:
+        description: Owner user id
+        required: true
+        type: string
+      text:
+        description: Meme text
+        required: true
+        type: string
+      freeze_seconds:
+        description: Final-frame hold (0-5)
+        required: false
+        default: "2"
+        type: string
+      audio_url:
+        description: Signed song URL (optional)
+        required: false
+        default: ""
+        type: string
+      song_id:
+        description: Song id (optional)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# One render at a time.
+concurrency:
+  group: render-meme
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install renderer
+        working-directory: render
+        run: npm install --no-audit --no-fund
+      - name: Render and publish
+        working-directory: render
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          MEME_ID: ${{ inputs.meme_id }}
+          OWNER_ID: ${{ inputs.owner_id }}
+          TEXT: ${{ inputs.text }}
+          FREEZE_SECONDS: ${{ inputs.freeze_seconds }}
+          AUDIO_URL: ${{ inputs.audio_url }}
+          SONG_ID: ${{ inputs.song_id }}
+        run: node render.mjs

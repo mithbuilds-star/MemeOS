@@ -9,11 +9,8 @@ export interface Env {
   META_REDIRECT_URI?: string;
   META_GRAPH_VERSION?: string;
   APP_ENV?: string;
-  RENDER_SERVICE_URL?: string;
-  RENDER_SERVICE_TOKEN?: string;
-  RENDER_API_KEY?: string;
-  RENDER_OWNER_ID?: string;
-  RENDER_SERVICE_ID?: string;
+  GITHUB_TOKEN?: string;
+  GITHUB_REPO?: string;
   AI?: { run: (model: string, input: any) => Promise<any> };
 }
 type Ctx = { userId: string; token: string };
@@ -215,29 +212,23 @@ async function signedSongUrl(env:Env,path:string){
 }
 async function renderReelForMeme(env:Env,meme:any){
   const ctx:Ctx={userId:meme.owner_id,token:""};
-  if(!env.RENDER_SERVICE_URL||!env.RENDER_SERVICE_TOKEN){await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"renderer_not_configured",reel_render_locked_until:null})});return {status:"renderer_not_configured"};}
+  const nowMs=Date.now();
+  // A render was already dispatched (or failed and is backing off): don't start another.
+  if(meme.reel_render_next_retry_at&&new Date(meme.reel_render_next_retry_at).getTime()>nowMs)return {status:"rendering_on_github"};
+  if(!env.GITHUB_TOKEN||!env.GITHUB_REPO){await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"renderer_not_configured",reel_render_locked_until:null})});return {status:"renderer_not_configured"};}
   const songs=await db(env,"song_library",`?${userFilter(ctx)}&is_active=eq.true&select=*&order=times_used.asc,last_used_at.asc.nullsfirst&limit=100`);
   const minUses=songs.length?Math.min(...songs.map((s:any)=>Number(s.times_used||0))):null;
   const leastUsed=songs.length?songs.filter((s:any)=>Number(s.times_used||0)===minUses):[];
   const song=leastUsed.length?leastUsed[Math.floor(Math.random()*leastUsed.length)]:null;
-  // Always render the video first so the photo-post PNG is literally its final frame.
-  // If no song is uploaded yet, keep a silent MP4 and retry audio selection on later cron ticks.
-  if(!song&&meme.reel_asset_url){await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"waiting_for_song"})});return {status:"waiting_for_song"};}
   const songUrl=song?await signedSongUrl(env,song.storage_path):null;
   const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=video_freeze_seconds`);
   const freeze=Math.max(0,Math.min(5,Number(settings[0]?.video_freeze_seconds??2)));
-  const response=await fetch(`${env.RENDER_SERVICE_URL.replace(/\/$/,"")}/render`,{method:"POST",headers:{"Content-Type":"application/json","x-render-token":env.RENDER_SERVICE_TOKEN},body:JSON.stringify({text:meme.extracted_text,freeze_seconds:freeze,...(songUrl?{audio_url:songUrl}:{})})});
-  const result:any=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||`Render service returned ${response.status}.`);
-  const video=Uint8Array.from(atob(result.video_base64),c=>c.charCodeAt(0));
-  const poster=Uint8Array.from(atob(result.poster_base64),c=>c.charCodeAt(0));
-  const videoPath=`${ctx.userId}/reels/${meme.id}.mp4`,posterPath=`${ctx.userId}/reels/${meme.id}-poster.png`;
-  const videoUrl=await storageUpload(env,videoPath,video.buffer as ArrayBuffer,"video/mp4");
-  const posterUrl=await storageUpload(env,posterPath,poster.buffer as ArrayBuffer,"image/png");
-  await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_asset_path:videoPath,reel_asset_url:videoUrl,reel_status:song?"generated":"waiting_for_song",reel_song_id:song?.id||null,reel_render_next_retry_at:null,reel_render_locked_until:null,asset_path:posterPath,asset_url:posterUrl})});
-  const videoAsset=await db(env,"meme_assets",`?${userFilter(ctx)}&meme_id=eq.${meme.id}&asset_type=eq.mp4&storage_path=eq.${encodeURIComponent(videoPath)}&select=id`);const videoMeta={owner_id:ctx.userId,meme_id:meme.id,asset_type:"mp4",storage_path:videoPath,width:1080,height:1920,generation_settings:{renderer:"brat-canvas-video",freeze_seconds:freeze,song_id:song?.id||null,has_audio:!!song}};if(videoAsset.length)await db(env,"meme_assets",`?id=eq.${videoAsset[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(videoMeta)});else await db(env,"meme_assets","",{method:"POST",body:JSON.stringify(videoMeta)});
-  const posterAsset=await db(env,"meme_assets",`?${userFilter(ctx)}&meme_id=eq.${meme.id}&asset_type=eq.png&storage_path=eq.${encodeURIComponent(posterPath)}&select=id`);const posterMeta={owner_id:ctx.userId,meme_id:meme.id,asset_type:"png",storage_path:posterPath,width:1080,height:1350,generation_settings:{renderer:"brat-canvas-video-final-frame",freeze_seconds:freeze}};if(posterAsset.length)await db(env,"meme_assets",`?id=eq.${posterAsset[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(posterMeta)});else await db(env,"meme_assets","",{method:"POST",body:JSON.stringify(posterMeta)});
-  if(song&&meme.reel_song_id!==song.id)await db(env,"song_library",`?id=eq.${song.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({times_used:Number(song.times_used||0)+1,last_used_at:new Date().toISOString()})});
-  return {status:song?"generated":"waiting_for_song",song_id:song?.id||null,freeze_seconds:freeze,video_path:videoPath,poster_path:posterPath};
+  const dispatch=await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render-meme.yml/dispatches`,{method:"POST",headers:{Authorization:`Bearer ${env.GITHUB_TOKEN}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"memeos-worker","Content-Type":"application/json"},body:JSON.stringify({ref:"main",inputs:{meme_id:String(meme.id),owner_id:String(ctx.userId),text:String(meme.extracted_text||"").slice(0,3000),freeze_seconds:String(freeze),audio_url:songUrl||"",song_id:song?.id||""}})});
+  if(!dispatch.ok){const detail=(await dispatch.text()).slice(0,200);throw new Error(`GitHub render dispatch failed (${dispatch.status}): ${detail}`);}
+  if(song)await db(env,"song_library",`?id=eq.${song.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({times_used:Number(song.times_used||0)+1,last_used_at:new Date().toISOString()})});
+  // The workflow writes the final status; keep the meme waiting until then.
+  await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"rendering",reel_song_id:song?.id||null,reel_render_locked_until:null,reel_render_next_retry_at:new Date(nowMs+30*60*1000).toISOString(),processing_error:null})});
+  return {status:"dispatched"};
 }
 
 async function processMemeInBackground(env:Env,meme:any){
@@ -273,6 +264,7 @@ async function processMemeInBackground(env:Env,meme:any){
     let reel:any;
     try{reel=await renderReelForMeme(env,{...current,owner_id:ctx.userId,extracted_text:text});}
     catch(e:any){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_next_retry_at:new Date(Date.now()+15*60*1000).toISOString(),processing_error:String(e?.message||e).slice(0,500),processing_locked_until:null,processing_next_retry_at:new Date(Date.now()+15*60*1000).toISOString()})});return {status:"render_failed"};}
+    if(reel.status==="dispatched"||reel.status==="rendering_on_github"){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_locked_until:null})});return {status:"rendering_on_github"};}
     if(reel.status==="renderer_not_configured"){await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_locked_until:null})});return {status:"waiting_for_renderer"};}
     const rows=await db(env,"memes",`?id=eq.${current.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({source_asset_path:current.source_asset_path||current.asset_path,source_asset_url:current.source_asset_url||current.asset_url,processing_status:"generated",processing_error:null,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null})});
 
@@ -310,7 +302,7 @@ async function runBackgroundProcessing(env:Env){
 
 async function runWaitingReels(env:Env){
   const now=new Date().toISOString();
-  const pending=await db(env,"memes",`?reel_status=in.(waiting_for_song,renderer_not_configured,render_failed)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(now)})&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status&order=created_at.asc&limit=10`);
+  const pending=await db(env,"memes",`?reel_status=in.(waiting_for_song,renderer_not_configured,render_failed,rendering)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(now)})&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status&order=created_at.asc&limit=10`);
   for(const meme of pending){
     const ctx:Ctx={userId:meme.owner_id,token:""};
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
@@ -320,7 +312,7 @@ async function runWaitingReels(env:Env){
     try{
       const result=await renderReelForMeme(env,meme);
       const patch:any={reel_render_locked_until:null};
-      if(result.status!=="renderer_not_configured"){
+      if(!["renderer_not_configured","dispatched","rendering_on_github"].includes(result.status)){
         const state=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&select=processing_status`);
         if(state[0]?.processing_status==="ready_for_asset")patch.processing_status="generated";
         patch.processing_error=null;
@@ -584,13 +576,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const queued = rows.filter((r) => ["needs_ocr", "ocr_complete", "ready_for_asset"].includes(r.processing_status) && !isLocked(r))
       .filter((r) => !r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs)
       .map((r) => ({ ...r, step: stepFor(r.processing_status) }));
-    let renderer = "not_configured";
-    if (env.RENDER_SERVICE_URL) {
-      try {
-        const h = await fetch(`${env.RENDER_SERVICE_URL.replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(8000) });
-        renderer = h.ok ? "ready" : `http_${h.status}`;
-      } catch { renderer = "unreachable"; }
-    }
+    const renderer = env.GITHUB_TOKEN && env.GITHUB_REPO ? "github_actions" : "not_configured";
     return json({ counts: { processing, reel }, renderer, items, stages, running, queued });
   }
   if (p === "/pipeline/retry" && method === "POST") {
@@ -609,20 +595,6 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     }
     const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_render_locked_until: null, reel_render_next_retry_at: null, processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
-  }
-  if (p === "/render-logs" && method === "GET") {
-    if (!env.RENDER_API_KEY || !env.RENDER_SERVICE_ID || !env.RENDER_OWNER_ID) return json({ configured: false, logs: [] });
-    const qs = new URLSearchParams({ ownerId: env.RENDER_OWNER_ID, direction: "backward", limit: "60", startTime: new Date(Date.now() - 60 * 60 * 1000).toISOString() });
-    qs.append("resource", env.RENDER_SERVICE_ID);
-    const r = await fetch(`https://api.render.com/v1/logs?${qs.toString()}`, { headers: { Authorization: `Bearer ${env.RENDER_API_KEY}`, Accept: "application/json" } });
-    const data: any = await r.json().catch(() => ({}));
-    if (!r.ok) return json({ configured: true, logs: [], error: `Render API returned ${r.status}.` });
-    const logs = (data.logs || []).map((l: any) => ({
-      timestamp: l.timestamp,
-      level: (l.labels || []).find((x: any) => x.name === "level")?.value || "info",
-      message: String(l.message || "").replace(/\x1b\[[0-9;]*m/g, ""),
-    })).reverse();
-    return json({ configured: true, logs });
   }
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}
   const processMatch=p.match(/^\/memes\/([0-9a-f-]+)\/process$/);
@@ -680,7 +652,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const count=(provider:string)=>creds.filter((c:any)=>c.provider===provider&&c.enabled).length;
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
     const jobs=await db(env,"jobs",`?${userFilter(ctx)}&status=in.(queued,running)&select=id`);
-    let renderStatus="Needs configuration";if(env.RENDER_SERVICE_URL&&env.RENDER_SERVICE_TOKEN){try{const r=await fetch(`${env.RENDER_SERVICE_URL.replace(/\/$/,"")}/health`,{headers:{"x-render-token":env.RENDER_SERVICE_TOKEN}});renderStatus=r.ok?"Service available":"Health check failed";}catch{renderStatus="Service unreachable";}}
+    let renderStatus=env.GITHUB_TOKEN&&env.GITHUB_REPO?"GitHub Actions ready":"Needs configuration";
     return json({status:"ok",automation:{paused:!!settings[0]?.global_paused,auto_process_enabled:settings[0]?.auto_process_enabled!==false,active_jobs:jobs.length},integrations:[{name:"Supabase",status:"Configured"},{name:"Apify",status:count("apify")?`${count("apify")} key(s) in API Manager`:"Needs setup"},{name:"Groq",status:count("groq")?`${count("groq")} key(s) in API Manager`:"Needs setup"},{name:"Meta",status:env.META_APP_ID&&env.META_APP_SECRET?"Credentials set":"Needs configuration"},{name:"Workers AI OCR",status:env.AI?"Server-side OCR available":"AI binding missing"},{name:"BRAT render service",status:renderStatus}]});
   }
   if(p==="/api-credentials"&&method==="GET"){

@@ -184,13 +184,13 @@ export function SettingsPage() {
 }
 
 export function Pipeline() {
-  const [data,setData]=useState<any>(null);const [logs,setLogs]=useState<any>(null);const [error,setError]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState("");
-  const load=()=>{api("/pipeline").then(setData).catch(e=>setError(e.message));api("/render-logs").then(setLogs).catch(()=>setLogs({configured:true,logs:[],error:"Could not load logs."}))};
+  const [data,setData]=useState<any>(null);const [error,setError]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState("");
+  const load=()=>{api("/pipeline").then(setData).catch(e=>setError(e.message))};
   useEffect(()=>{load();const t=setInterval(load,15000);return ()=>clearInterval(t)},[]);
   const retryAll=async()=>{setBusy("all");setMessage("");try{const r=await api("/pipeline/retry",{method:"POST",body:"{}"});setMessage(`Requeued ${r.requeued} item(s) and ${r.reel_requeued} reel render(s). They run on the next cron tick.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const retryOne=async(id:string)=>{setBusy(id);setMessage("");try{const r=await api(`/memes/${id}/process`,{method:"POST",body:"{}"});setMessage(`Queued ${id.slice(0,8)} at ${r.processing_status}.`);load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const stages:any[]=data?.stages||[];const running:any[]=data?.running||[];const queued:any[]=data?.queued||[];
-  const rendererOk=data?.renderer==="ready";
+  const rendererOk=data?.renderer==="github_actions";
   const who=(m:any)=>m.source_username?`@${m.source_username}`:"Manual";
   const bar={height:10,background:"#e5e5e5",borderRadius:6,overflow:"hidden"} as const;
   return <>
@@ -211,8 +211,8 @@ export function Pipeline() {
       {queued.length===0?<Empty title="Queue is empty" text="Nothing is waiting to be processed."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>NEXT STEP</th></tr></thead><tbody>{queued.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,60)}</small></td><td>{m.step}</td></tr>)}</tbody></table></div>}
     </div>
     <div className="panel" style={{marginTop:18}}>
-      <div className="panel-head"><div><h3>Render service log</h3><p>Last hour of output from the BRAT render service.</p></div></div>
-      {!logs?<small>Loading…</small>:!logs.configured?<Notice kind="info">Add RENDER_API_KEY to the Worker secrets to see live logs.</Notice>:logs.error?<Notice kind="warn">{logs.error}</Notice>:logs.logs.length===0?<small>No log lines in the last hour.</small>:<pre style={{maxHeight:320,overflow:"auto",background:"#111",color:"#ddd",padding:12,borderRadius:8,fontSize:12,whiteSpace:"pre-wrap"}}>{logs.logs.map((l:any,i:number)=><div key={i} style={{color:l.level==="error"?"#f87171":l.level==="warn"?"#fbbf24":"#ddd"}}>{new Date(l.timestamp).toLocaleTimeString()}  {l.message}</div>)}</pre>}
+      <div className="panel-head"><div><h3>Render runs</h3><p>Each video renders as a GitHub Actions job with its own logs.</p></div></div>
+      <a href="https://github.com/mithbuilds-star/MemeOS/actions/workflows/render-meme.yml" target="_blank" rel="noreferrer">Open render-meme runs on GitHub</a>
     </div>
     <div className="panel" style={{marginTop:18}}>
       <div className="panel-head"><div><h3>Stuck and failed items</h3><p>Latest error for each item. Retry one or all.</p></div><span className="tag">{data?.items?.length??0} ITEMS</span></div>
