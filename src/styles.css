@@ -11,3 +11,10 @@
 
 /* Compact account destructive action */
 .danger-outline{border-color:#663b3b;color:var(--danger);background:transparent}.danger-outline:hover{background:#9b29291a;border-color:var(--danger)}
+
+/* Dropdowns: a styled select that matches the rest of the app in both themes. */
+select{appearance:none;-webkit-appearance:none;-moz-appearance:none;width:100%;min-height:42px;padding:11px 40px 11px 14px;background-color:var(--panel2);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23858585' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 15px center;border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:13px;font-weight:500;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+select:hover{border-color:color-mix(in srgb,var(--text) 22%,var(--border))}
+select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 24%,transparent)}
+select:disabled{opacity:.5;cursor:not-allowed}
+select option{background:var(--panel);color:var(--text);padding:8px}
