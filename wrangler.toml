@@ -15,7 +15,7 @@ META_GRAPH_VERSION = "v27.0"
 GITHUB_REPO = "mithbuilds-star/MemeOS"
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]
 
 # Workers AI provides server-side image text extraction.
 [ai]
