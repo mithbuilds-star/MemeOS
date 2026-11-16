@@ -278,8 +278,10 @@ async function runBackgroundProcessing(env:Env){
   const now=new Date().toISOString();
   const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(now)})&select=*&order=created_at.asc&limit=20`);
   let processed=0;
+  // Keep working through the queue within this tick (about 45 s), so the next item starts as soon as the last one finishes.
+  const tickStart=Date.now();
   for(const meme of pending){
-    if(processed>=5)break;
+    if(Date.now()-tickStart>45000)break;
     const ctx:Ctx={userId:meme.owner_id,token:""};
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled,discovery_interval_minutes`);
     if(settings[0]?.global_paused||settings[0]?.auto_process_enabled===false)continue;
