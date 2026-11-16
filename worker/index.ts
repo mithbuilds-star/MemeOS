@@ -264,6 +264,34 @@ async function renderReelForMeme(env:Env,meme:any,token:string|null){
   return {status:"dispatched"};
 }
 
+// Text fingerprint: SHA-256 of the normalised text. Must match the backfill in migration 0011.
+async function textFingerprint(text:string):Promise<string|null>{
+  const norm=String(text||"").normalize("NFC").trim().replace(/\s+/g," ").toLowerCase();
+  if(!norm)return null;
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(norm));
+  return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+// Returns the id of an earlier meme (any time, any status) with the same text, or null when the text is new.
+// A new text is recorded so later memes are checked against it.
+async function findDuplicateText(env:Env,ctx:Ctx,memeId:string,text:string):Promise<string|null>{
+  const fp=await textFingerprint(text);
+  if(!fp)return null;
+  const base=`owner_id=eq.${encodeURIComponent(ctx.userId)}`;
+  // If this meme's text was edited, forget its old fingerprint.
+  await db(env,"meme_text_fingerprints",`?${base}&meme_id=eq.${encodeURIComponent(memeId)}&fingerprint=neq.${fp}`,{method:"DELETE"});
+  const existing=await db(env,"meme_text_fingerprints",`?${base}&fingerprint=eq.${fp}&select=meme_id`);
+  if(existing?.length)return existing[0].meme_id===memeId?null:existing[0].meme_id;
+  try{
+    await db(env,"meme_text_fingerprints","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,fingerprint:fp,meme_id:memeId})});
+    return null;
+  }catch(e:any){
+    // Another worker recorded the same text at the same moment: re-read and decide.
+    const again=await db(env,"meme_text_fingerprints",`?${base}&fingerprint=eq.${fp}&select=meme_id`);
+    if(again?.length&&again[0].meme_id!==memeId)return again[0].meme_id;
+    return null;
+  }
+}
+
 async function processMemeInBackground(env:Env,meme:any,token:string){
   const ctx:Ctx={userId:meme.owner_id,token:""};
   const timeoutMs=L.DEFAULTS.attemptTimeoutMs;
@@ -294,6 +322,13 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
   }
   if(current.processing_status==="ocr_complete"){
     if(!current.extracted_text?.trim())throw new Error("OCR produced no text to classify.");
+    // Duplicate check against every earlier text: a repeat is rejected before any classification or rendering.
+    const duplicateOf=await findDuplicateText(env,ctx,current.id,current.extracted_text);
+    if(duplicateOf){
+      await memeWrite(env,ctx,current.id,token,{processing_status:"rejected",classification:"rejected",classification_reason:"Duplicate: this text already appears in an earlier meme.",processing_error:null,processing_locked_until:null,processing_token:null,processing_next_retry_at:null});
+      LOG("duplicate_text_rejected",{meme_id:current.id,duplicate_of:duplicateOf,worker_id:token});
+      return {status:"duplicate"};
+    }
     await renewLease(env,ctx,current.id,token);
     const started=Date.now();
     const classification=await withTimeout(classifyTextWithGroq(env,ctx,current.extracted_text),timeoutMs,"Classification request");
@@ -379,7 +414,7 @@ async function runWaitingReels(env:Env){
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"failed":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
   const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
-  const auto=await db(env,"memes",`?reel_status=eq.renderer_not_configured&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
+  const auto=await db(env,"memes",`?reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
   const manual=await db(env,"memes",`?reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
   const pending=[...auto,...manual].slice(0,10);
   for(const meme of pending){
@@ -584,6 +619,28 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({classification:"rejected",classification_reason:"Rejected by user in content library.",processing_status:"rejected",processing_locked_until:null,reel_status:"not_started",reel_render_locked_until:null,reel_render_next_retry_at:null})});
     await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}`,{method:"PATCH",body:JSON.stringify({approval_status:"rejected",status:"rejected",scheduled_at:null,rejection_reason:"Rejected by user."})});
     return json({meme:updated?.[0]});
+  }
+  // Convert a meme between photo post and Reel. A Reel that doesn't exist yet is queued for render.
+  const formatMatch=p.match(/^\/memes\/([0-9a-f-]+)\/format$/);
+  if(formatMatch&&method==="POST"){
+    const memeId=formatMatch[1];
+    if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
+    const format=body.format;
+    if(!["photo","reel"].includes(format))return fail("format must be photo or reel.");
+    const rows:any[]=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=id,processing_status,asset_url,reel_asset_url,reel_status`);
+    const m=rows?.[0];
+    if(!m)return fail("Meme not found.",404);
+    if(format==="photo"){
+      await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"photo"})});
+      return json({output_format:"photo",ready:!!m.asset_url});
+    }
+    if(m.reel_asset_url){
+      await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"reel"})});
+      return json({output_format:"reel",ready:true});
+    }
+    // No Reel yet: queue a render. The waiting-reels sweep picks it up within a minute.
+    await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"reel",reel_status:"render_requested",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:null,processing_attempts:0})});
+    return json({output_format:"reel",ready:false});
   }
   const approveMatch=p.match(/^\/memes\/([0-9a-f-]+)\/approve$/);
   if(approveMatch&&method==="POST"){
