@@ -488,10 +488,10 @@ export function ActivityLog() {
   const load=()=>api("/activity").then(r=>{setItems(r.logs||[]);setError("");}).catch((e:any)=>setError(e.message)).finally(()=>setLoading(false));
   useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer);},[]);
   const content=<div className="panel">
-    <div className="panel-head"><div><h3>Recent activity</h3><p>Major batch events and reconstructed history from existing workspace records.</p></div><div style={{display:"flex",alignItems:"center",gap:10}}><span className="tag">{items.length} EVENTS</span><button className="btn small secondary" onClick={load}><Activity size={13}/> Refresh</button></div></div>
+    <div className="panel-head"><div><h3>Recent activity</h3><p>Major pipeline events and activity from your workspace.</p></div><div style={{display:"flex",alignItems:"center",gap:10}}><span className="tag">{items.length} events</span><button className="btn small secondary" onClick={load}><Activity size={13}/> Refresh</button></div></div>
     {error&&<Notice kind="warn">{error}</Notice>}
-    {loading?<p>Loading activity…</p>:items.length===0?<Empty title="No activity recorded yet" text="New batch events will appear here as the pipeline runs."/>:<div className="activity-log-table-wrap"><table className="activity-log-table"><thead><tr><th>EVENT</th><th>DETAILS</th><th>TIME</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><b>{String(item.event_type||"event").replace(/_/g," ")}</b></td><td>{item.message}{item.metadata?.count!=null&&<small>{item.metadata.count} items</small>}</td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
-    <div className="panel-foot">Older entries are reconstructed from saved discovery, meme and assignment records. They are summaries, not a verbatim event-by-event audit trail.</div>
+    {loading?<p>Loading activity…</p>:items.length===0?<Empty title="No activity recorded yet" text="New batch events will appear here as the pipeline runs."/>:<div className="activity-log-table-wrap"><table className="activity-log-table"><thead><tr><th>Event</th><th>Details</th><th>Time</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><b>{String(item.event_type||"event").replace(/^historical_/,"").replace(/_/g," ").replace(/^./,c=>c.toUpperCase())}</b></td><td>{item.message}{item.metadata?.count!=null&&<small>{item.metadata.count} items</small>}</td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
+    <div className="panel-foot">Older entries are summaries based on saved discovery, meme and assignment records.</div>
   </div>;
-  return <><PageHead eyebrow="WORKSPACE HISTORY" title="Activity log" desc="Major pipeline events and available historical summaries."/>{content}</>;
+  return <><PageHead eyebrow="WORKSPACE" title="Activity log" desc="Major pipeline events and activity from your workspace."/>{content}</>;
 }
