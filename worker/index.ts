@@ -1223,9 +1223,12 @@ async function scheduleDailyAutoPosts(env:Env,ctx:Ctx,settings:any){
     return new Date(guess);
   };
   const slots=ranked[day].map(t=>toIso(t)).filter(d=>d.getTime()>Date.now()+60000);
-  const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&auto_scheduled=eq.true&scheduled_at=gte.${encodeURIComponent(toIso("00:00").toISOString())}&select=scheduled_at`);
-  const used=new Set((existing||[]).filter((r:any)=>String(r.scheduled_at||"").startsWith(date)).map((r:any)=>new Date(r.scheduled_at).getTime()));
-  const available=slots.filter(d=>!used.has(d.getTime())).slice(0,Math.max(1,Math.min(10,Number(settings.posts_per_day||3))));
+  const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&scheduled_at=gte.${encodeURIComponent(toIso("00:00").toISOString())}&select=scheduled_at,auto_scheduled`);
+  const todays=(existing||[]).filter((r:any)=>String(r.scheduled_at||"").startsWith(date));
+  const used=new Set(todays.map((r:any)=>new Date(r.scheduled_at).getTime()));
+  const autoCount=todays.filter((r:any)=>r.auto_scheduled).length;
+  const remaining=Math.max(0,Math.min(10,Number(settings.posts_per_day||3))-autoCount);
+  const available=slots.filter(d=>!used.has(d.getTime())).slice(0,remaining);
   if(!available.length)return;
   const queue=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.approved&status=in.(approved,pending)&scheduled_at=is.null&select=id,publish_format,meme_id&order=created_at.desc&limit=20`);
   let count=0;
