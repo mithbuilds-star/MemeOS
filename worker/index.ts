@@ -230,35 +230,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});
     }
   }
-  // Fewer than five recent posts means this source is likely quiet or its
-  // previous cursor was advanced past older content. Start one bounded historical
-  // pass ending at the oldest post returned by the incremental scrape.
-  const lastSuccessfulScrapeAt=job.metadata?.last_successful_scrape_at?Date.parse(job.metadata.last_successful_scrape_at):null;
-  const genuinelyNewPosts=lastSuccessfulScrapeAt?items.filter((item:any)=>{
-    const postedAt=normalizeApifyItem(item).postedAt;
-    return !!postedAt&&Date.parse(postedAt)>lastSuccessfulScrapeAt;
-  }):[];
-  if(job.metadata?.phase!=="backfill"&&lastSuccessfulScrapeAt!==null&&genuinelyNewPosts.length<SCRAPE_BACKFILL_THRESHOLD){
-    const dated=genuinelyNewPosts.map((item:any)=>normalizeApifyItem(item).postedAt).filter((v:any)=>!!v).map((v:string)=>new Date(v).getTime()).filter((v:number)=>Number.isFinite(v));
-    const oldest=dated.length?new Date(Math.min(...dated)).toISOString():new Date(lastSuccessfulScrapeAt).toISOString();
-      const credentialRows=await db(env,"api_credentials",`?id=eq.${encodeURIComponent(String(job.metadata?.credential_id||""))}&${userFilter(ctx)}&select=*`);
-      const credential=credentialRows?.[0];
-      if(credential&&credential.enabled!==false){
-        try{
-          const secret=await decryptSecret(env,credential);
-          const actorId=credential.actor_id||DEFAULT_APIFY_ACTOR;
-          const actor=encodeURIComponent(actorId.replace("/","~"));
-          const backfillInput=buildActorInput(credential.actor_input,sourceNames,actorId,10000,null,oldest);
-          const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(backfillInput)});
-          const result:any=await response.json().catch(()=>({}));
-          if(!response.ok)throw new Error(result.error?.message||`Apify backfill returned ${response.status}.`);
-          await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:sourceNames,source_reference_account_id:job.metadata?.source_reference_account_id,scheduled:job.metadata?.scheduled,phase:"backfill",backfill_before:oldest,backfill_for_job_id:job.id}})});
-          LOG("discovery_backfill_started",{source_usernames:sourceNames,newer_posts:genuinelyNewPosts.length,items_seen:items.length,backfill_before:oldest});
-        }catch(e:any){
-          LOG("discovery_backfill_start_failed",{source_usernames:sourceNames,error:String(e?.message||e).slice(0,300)});
-        }
-      }
-    }
+  // Historical backfill is intentionally manual. Automatically fetching an entire
+  // profile timeline when fewer than five new posts appear can consume thousands
+  // of paid Apify results while importing very little content.
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,inserted,skipped,failed_media:failedMedia}})});
   await refreshAllCredentialUsage(env,ctx);
   await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
@@ -563,7 +537,7 @@ async function runWaitingReels(env:Env){
 }
 
 const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
-const SCRAPE_BATCH=10000;
+const SCRAPE_BATCH=25;
 const SCRAPE_BACKFILL_THRESHOLD=5;
 
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false){
@@ -573,9 +547,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
     try{
       const secret=await decryptSecret(env,credential);
       const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));
-      // Incremental scan starts at this source's last successfully completed scrape.
-      // A large per-profile cap lets us accurately decide whether a historical
-      // backfill is needed instead of mistaking a capped result set for <5 posts.
+      // Incremental scan only: cap each profile run to limit paid Apify results.
       const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,source.last_scraped_at||null);
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
       const result:any=await response.json().catch(()=>({}));
