@@ -79,7 +79,7 @@ export default function App() {
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><Command size={19}/></div>{!collapsed && <div><b>MemeOS</b><small>CONTENT OPERATIONS</small></div>}<button className="icon-btn mobile-close" onClick={() => setMobileOpen(false)}><X size={17}/></button></div>
       <div className="workspace-label">{!collapsed && "WORKSPACE"}</div>
-      <nav>{nav.map(([label, path, Icon]) => <NavLink key={path} to={path} end={path === "/"} onClick={() => setMobileOpen(false)} title={collapsed ? label : undefined}><Icon size={17}/>{!collapsed && <span>{label}</span>}{path === "/queue" && !collapsed && <em className="nav-count">—</em>}</NavLink>)}</nav>
+      <nav>{nav.map(([label, path, Icon]) => <NavLink key={path} to={path} end={path === "/"} onClick={() => setMobileOpen(false)} title={collapsed ? label : undefined}><Icon size={17}/>{!collapsed && <span>{label}</span>}</NavLink>)}</nav>
       <div className="sidebar-bottom">
         <div className="plan-card">{!collapsed && <><span className="status-dot"/> <div><b>V1 workspace</b><small>Core operations</small></div></>}</div>
         <button className="nav-link logout" onClick={logout}><LogOut size={17}/>{!collapsed && "Sign out"}</button>
