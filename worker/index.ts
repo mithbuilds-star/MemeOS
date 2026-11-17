@@ -125,26 +125,43 @@ async function assignDiscoveredMeme(env:Env,ctx:Ctx,memeId:string,sourceId:strin
   for(const destination of selected){const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}&destination_account_id=eq.${destination}&select=id`);if(!existing.length){await db(env,"account_meme_assignments","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,meme_id:memeId,destination_account_id:destination,assignment_source:direct.has(destination)?"discovery":"inheritance",approval_status:"pending",status:"pending"})});}}
 }
 
+async function apifyRequestWithFallback(env:Env,ctx:Ctx,url:string){
+  const now=new Date().toISOString();
+  const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(now)})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+  if(!creds.length)throw new Error("No available Apify API key. Enable another key in Settings → API Manager.");
+  let lastError="Apify request failed.";
+  for(const credential of creds){
+    try{
+      const secret=await decryptSecret(env,credential);
+      const response=await fetch(url,{headers:{Authorization:`Bearer ${secret}`}});
+      if(!response.ok){
+        const data:any=await response.clone().json().catch(()=>({}));
+        lastError=data.error?.message||`Apify returned ${response.status}.`;
+        await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,credential.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});
+        continue;
+      }
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+      return response;
+    }catch(e:any){lastError=e?.message||lastError;}
+  }
+  throw new Error(lastError);
+}
+
 async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
-  const creds = await db(env,"api_credentials",`?id=eq.${job.metadata?.credential_id}&${userFilter(ctx)}&select=*`);
-  if (!creds.length) throw new Error("The Apify credential used for this run no longer exists.");
-  const secret = await decryptSecret(env,creds[0]);
-  const runId = job.provider_run_id;
-  if (!runId) throw new Error("Discovery job has no Apify run ID.");
-  const statusRes = await fetch(`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,{headers:{Authorization:`Bearer ${secret}`}});
-  const statusData:any = await statusRes.json().catch(()=>({}));
-  if (!statusRes.ok) throw new Error(statusData.error?.message || `Apify run lookup failed (${statusRes.status}).`);
-  const run = statusData.data || {};
-  if (!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status)) return { done:false, status:run.status };
-  if (run.status !== "SUCCEEDED") {
+  const runId=job.provider_run_id;
+  if(!runId)throw new Error("Discovery job has no Apify run ID.");
+  const statusRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`);
+  const statusData:any=await statusRes.json().catch(()=>({}));
+  const run=statusData.data||{};
+  if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status))return {done:false,status:run.status};
+  if(run.status!=="SUCCEEDED"){
     await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:`Apify run finished with status ${run.status}.`,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
     throw new Error(`Apify run finished with status ${run.status}.`);
   }
-  const datasetId = run.defaultDatasetId || job.metadata?.dataset_id;
-  if (!datasetId) throw new Error("Apify run completed without a dataset ID.");
-  const itemsRes = await fetch(`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=200`,{headers:{Authorization:`Bearer ${secret}`}});
-  if (!itemsRes.ok) throw new Error(`Could not retrieve Apify dataset (${itemsRes.status}).`);
-  const items:any[] = await itemsRes.json();
+  const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
+  if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
+  const itemsRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=200`);
+  const items:any[]=await itemsRes.json();
   // Import the full date-filtered dataset; source_post_id deduplication handles overlaps.
   const batch=items;
   let inserted = 0, skipped = 0, failedMedia = 0;
@@ -191,7 +208,7 @@ async function classifyTextWithGroq(env:Env,ctx:Ctx,text:string){
       const secret=await decryptSecret(env,credential);
       const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Classify whether a meme can be faithfully converted into a text-only BRAT-style image. Return JSON only: {\"suitable\":boolean,\"reason\":string}. suitable=true only when the complete joke/meaning is carried by the extracted words alone and does not depend on a photo, reaction face, screenshot layout, visual context, or image-specific details. Never rewrite, correct, summarize, or improve the text."},{role:"user",content:`Extracted text (preserve exactly):\\n${text}`} ]})});
       const data:any=await response.json().catch(()=>({}));
-      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,credential.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});if(response.status===429||response.status===401||response.status>=500)continue;break;}
+      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,credential.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
       const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}");
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
       return {suitable:parsed.suitable===true,reason:String(parsed.reason||"No explanation provided.").slice(0,500)};
@@ -214,7 +231,7 @@ async function generateCaptionWithGroq(env:Env,ctx:Ctx,meme:any):Promise<string>
         {role:"user",content:"Meme text:\n"+source.slice(0,3000)}
       ]})});
       const data:any=await response.json().catch(()=>({}));
-      if(!response.ok){lastError=data.error?.message||"Groq returned "+response.status+".";await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
+      if(!response.ok){lastError=data.error?.message||"Groq returned "+response.status+".";await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,credential.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
       const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}");
       const caption=String(parsed.caption||"").trim().toLowerCase().replace(/^["']+|["']+$/g,"").replace(/[.!?,;:]+$/g,"").replace(/\s+/g," ");
       if(!/^[a-z0-9][a-z0-9'_-]*(?:\s+[a-z0-9][a-z0-9'_-]*)?$/.test(caption))throw new Error("AI returned a caption that was not one or two words. Try approving again.");
@@ -1169,7 +1186,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       const secret=await decryptSecret(env,credential);
       const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+secret,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Match the user's natural-language question to exactly one Help article. Choose the closest article even if the wording differs. Return JSON only: {\"article_id\":\"one supplied id\"}. Never invent an id."},{role:"user",content:JSON.stringify({query,articles:articles.map(({id,title,body})=>({id,title,body}))})}]})});
       const data:any=await response.json().catch(()=>({}));
-      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;if(response.status===429||response.status===401||response.status>=500)continue;break;}
+      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;continue;}
       const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}"),article=articles.find(x=>x.id===parsed.article_id);
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
       if(!article)return fail("No matching Help article. Try describing what you want to do another way.",404);
@@ -1199,7 +1216,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     for(const credential of creds){try{
       const secret=await decryptSecret(env,credential);
       const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Classify whether a meme can be faithfully converted into a text-only BRAT-style image. Return JSON only: {\"suitable\":boolean,\"reason\":string}. suitable=true only when the complete joke/meaning is carried by the extracted words alone and does not depend on a photo, reaction face, screenshot layout, visual context, or image-specific details. Never rewrite, correct, summarize, or improve the text."},{role:"user",content:`Extracted text (preserve exactly):\\n${meme.extracted_text}`} ]})});
-      const data:any=await response.json().catch(()=>({}));if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});if(response.status===429||response.status===401||response.status>=500)continue;break;}
+      const data:any=await response.json().catch(()=>({}));if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
       result=JSON.parse(data.choices?.[0]?.message?.content||"{}");await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});break;
     }catch(e:any){lastError=e.message||lastError;}}
     if(!result)return fail(lastError,502);
