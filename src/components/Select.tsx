@@ -23,7 +23,7 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
     const existing = options.find((o) => o.value === defaultValue);
     const fallback: SelectOption = {
       value: defaultValue,
-      label: defaultLabel || (defaultValue === "" ? placeholder : `Default · ${existing?.label || placeholder}`),
+      label: defaultLabel || existing?.label || placeholder,
     };
     return existing
       ? options.map((o) => o.value === defaultValue ? fallback : o)
