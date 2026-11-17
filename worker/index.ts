@@ -1216,7 +1216,7 @@ async function scheduleDailyAutoPosts(env:Env,ctx:Ctx,settings:any){
   for(const row of existing||[]){if(!row.scheduled_at)continue;const instant=new Date(row.scheduled_at),key=localDateKey(instant);if(!usedByDay.has(key))usedByDay.set(key,new Set<number>());usedByDay.get(key)!.add(instant.getTime());countByDay.set(key,(countByDay.get(key)||0)+1);}
   const dailyLimit=Math.max(1,Math.min(10,Number(settings.posts_per_day||3))),available:Date[]=[];
   const queue=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.approved&status=in.(approved,pending)&scheduled_at=is.null&select=id,publish_format,meme_id&order=created_at.desc&limit=300`);
-  const horizon=Math.min(365,Math.ceil(queue.length/dailyLimit)+7),todayParts=today.split("-").map(Number);
+  const horizon=Math.min(365,Math.ceil((queue.length+(existing||[]).length)/dailyLimit)+7),todayParts=today.split("-").map(Number);
   for(let offset=0;offset<horizon;offset++){const d=new Date(Date.UTC(todayParts[0],todayParts[1]-1,todayParts[2]+offset,12));const date=d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0")+"-"+String(d.getUTCDate()).padStart(2,"0"),day=d.getUTCDay(),used=usedByDay.get(date)||new Set<number>();let remaining=dailyLimit-(countByDay.get(date)||0);if(remaining<=0)continue;const daySlots:Date[]=[];for(const time of ranked[day]){const slot=toIso(date,time);if(slot.getTime()<=now.getTime()+60000||used.has(slot.getTime()))continue;daySlots.push(slot);if(daySlots.length>=remaining)break;}daySlots.sort((a,b)=>a.getTime()-b.getTime());available.push(...daySlots);}
   if(!available.length)return;
   let slotIndex=0,count=0;
