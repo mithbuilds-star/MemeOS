@@ -100,7 +100,7 @@ export default function App() {
         <Route path="/discovery" element={<Discovery/>}/><Route path="/queue" element={<Queue/>}/>
         <Route path="/library" element={<Library/>}/><Route path="/songs" element={<SongLibrary/>}/><Route path="/creator" element={<Creator/>}/>
         <Route path="/scheduler" element={<Scheduler/>}/><Route path="/publishing" element={<Publishing/>}/>
-        <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/><Route path="/activity" element={<Navigate to="/pipeline" replace/>}/><Route path="/pipeline" element={<Pipeline/>}/><Route path="/pipeline/:stage" element={<PipelineStageRoute/>}/>
+        <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/><Route path="/activity" element={<ActivityLog/>}/><Route path="/pipeline" element={<Pipeline/>}/><Route path="/pipeline/:stage" element={<PipelineStageRoute/>}/>
         <Route path="/settings" element={<SettingsPage/>}/><Route path="/help" element={<Help/>}/><Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes></div>
     </main>
