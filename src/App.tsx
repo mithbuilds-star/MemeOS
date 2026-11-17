@@ -1,20 +1,20 @@
 import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import {
-  Activity, BarChart3, CalendarDays, CheckCheck, ChevronDown, CircleHelp, Instagram,
+  Activity, BarChart3, CalendarDays, CheckCheck, ChevronDown, CircleHelp, Instagram, BookOpen,
   Clapperboard, Command, Compass, Database, FileImage, LayoutDashboard,
   LogOut, Menu, Moon, Plus, Search, Settings, ShieldCheck, Sun, Users,
   Workflow, X
 } from "lucide-react";
 import { initializeSupabase, supabase } from "./lib/supabase";
-import { Overview, Accounts, InstagramDashboard, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline } from "./pages";
+import { Overview, Accounts, InstagramDashboard, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline, Help } from "./pages";
 
 const nav = [
   ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users], ["Instagram", "/instagram", Instagram],
   ["Discovery", "/discovery", Compass], ["Approval Queue", "/queue", CheckCheck],
   ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage], ["Meme Creator", "/creator", Clapperboard],
   ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow],
-  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity], ["Pipeline", "/pipeline", Activity],
+  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity], ["Pipeline", "/pipeline", Activity], ["Help", "/help", BookOpen],
   ["Settings", "/settings", Settings]
 ] as const;
 
@@ -101,7 +101,7 @@ export default function App() {
         <Route path="/library" element={<Library/>}/><Route path="/songs" element={<SongLibrary/>}/><Route path="/creator" element={<Creator/>}/>
         <Route path="/scheduler" element={<Scheduler/>}/><Route path="/publishing" element={<Publishing/>}/>
         <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/><Route path="/pipeline" element={<Pipeline/>}/>
-        <Route path="/settings" element={<SettingsPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/>
+        <Route path="/settings" element={<SettingsPage/>}/><Route path="/help" element={<Help/>}/><Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes></div>
     </main>
   </div>;
