@@ -850,7 +850,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   }
   const destSourceMatch=p.match(/^\/destination-sources\/([0-9a-f-]+)$/);
   if(destSourceMatch&&method==="DELETE"){if(!await owned(env,"destination_sources",destSourceMatch[1],ctx))return fail("Source assignment not found.",404);await db(env,"destination_sources",`?id=eq.${destSourceMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});return json({ok:true});}
-  if(p==="/memes"&&method==="GET")return json({memes:await db(env,"memes",`?${userFilter(ctx)}&select=*&order=created_at.desc&limit=100`)});
+  if(p==="/memes"&&method==="GET")return json({memes:await db(env,"memes",`?${userFilter(ctx)}&select=*&order=created_at.desc&limit=5000`)});
   if(p==="/captions/backfill"&&method==="POST"){
     const ids=Array.isArray(body.meme_ids)?Array.from(new Set(body.meme_ids.map((x:any)=>String(x)).filter((x:string)=>/^[0-9a-f-]{36}$/i.test(x)))).slice(0,300):[];
     if(!ids.length)return json({generated:0,remaining:0,failed:[],message:"No scheduler memes were supplied."});
@@ -1298,7 +1298,7 @@ async function scheduleDailyAutoPosts(env:Env,ctx:Ctx,settings:any){
   for(let offset=0;offset<horizon;offset++){const d=new Date(Date.UTC(todayParts[0],todayParts[1]-1,todayParts[2]+offset,12));const date=d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0")+"-"+String(d.getUTCDate()).padStart(2,"0"),day=d.getUTCDay(),used=usedByDay.get(date)||new Set<number>();let remaining=dailyLimit-(countByDay.get(date)||0);if(remaining<=0)continue;const daySlots:Date[]=[];for(const time of ranked[day]){const slot=toIso(date,time);if(slot.getTime()<=now.getTime()+60000||used.has(slot.getTime()))continue;daySlots.push(slot);if(daySlots.length>=remaining)break;}daySlots.sort((a,b)=>a.getTime()-b.getTime());available.push(...daySlots);if(available.length>=readyQueue.length)break;}
   let slotIndex=0,count=0;
   for(const item of readyQueue){if(slotIndex>=available.length)break;const slot=available[slotIndex],updated=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&scheduled_at=is.null`,{method:"PATCH",body:JSON.stringify({scheduled_at:slot.toISOString(),status:"scheduled",auto_scheduled:true})});if(updated?.length){slotIndex++;count++;}}
-  if(count)console.log("Rolling auto-scheduled posts",ctx.userId,count);
+  if(count){console.log("Rolling auto-scheduled posts",ctx.userId,count);await logMajorActivity(env,ctx.userId,"scheduling_batch",`${count} approved memes were automatically scheduled.`,count,{scheduled_count:count});}
 }
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
