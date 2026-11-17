@@ -259,7 +259,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
         }
       }
     }
-  }
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,inserted,skipped,failed_media:failedMedia}})});
   await refreshAllCredentialUsage(env,ctx);
   await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
