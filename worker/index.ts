@@ -438,8 +438,8 @@ async function runWaitingReels(env:Env){
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
   const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
-  const auto=await db(env,"memes",`?processing_status=neq.discarded&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
-  const manual=await db(env,"memes",`?processing_status=neq.discarded&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
+  const auto=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
+  const manual=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
   const pending=[...auto,...manual].slice(0,10);
   for(const meme of pending){
     const ctx:Ctx={userId:meme.owner_id,token:""};
