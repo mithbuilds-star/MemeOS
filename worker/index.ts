@@ -1352,13 +1352,18 @@ export default {
     // Durable, bounded Apify polling. A failed transient attempt is rescheduled instead of
     // losing the run; terminal Apify statuses are marked failed by runApifyPoll.
     const now=new Date().toISOString();
-    const jobs = await db(env,"jobs",`?job_type=eq.discovery&status=in.(running,queued)&or=(next_retry_at.is.null,next_retry_at.lte.${encodeURIComponent(now)})&select=*&order=created_at.asc&limit=1`);
+    const jobs = await db(env,"jobs",`?job_type=eq.discovery&status=in.(running,queued)&or=(next_retry_at.is.null,next_retry_at.lte.${encodeURIComponent(now)})&select=*&order=created_at.asc&limit=30`);
+    let polledJobs=0;
     for (const job of jobs) {
+      if(polledJobs>=5)break;
+      // Skip leased jobs instead of letting the oldest lock block every newer run.
+      if(job.locked_until&&new Date(job.locked_until).getTime()>Date.now())continue;
       const ctx:Ctx={userId:job.owner_id,token:""};
       try {
         const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)continue;
         const lease=await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}&status=in.(running,queued)&or=(locked_until.is.null,locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({last_attempt_at:now,locked_until:new Date(Date.now()+12*60*1000).toISOString()})});
         if(!lease?.length)continue;
+        polledJobs++;
         const result=await runApifyPoll(env,ctx,{...job,...lease[0]});
         if(!result.done)await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"running",locked_until:null,next_retry_at:new Date(Date.now()+5*60*1000).toISOString()})});
       } catch (e:any) {
