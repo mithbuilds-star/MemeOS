@@ -460,17 +460,40 @@ export function Pipeline() {
     <div className="panel" style={{marginTop:18}}>
       <div className="panel-head"><div><h3>Where everything goes</h3><p>Live counts for every stage and terminal outcome. Updates with the pipeline every 15 seconds.</p></div><span className="tag">{data?.total??0} TOTAL ITEMS</span></div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:10,alignItems:"stretch"}}>
-        {(data?.flow||[]).map((stage:any,i:number)=><div key={stage.key} style={{border:"1px solid var(--border, #333)",borderRadius:12,padding:14,minWidth:0,background:"var(--panel, transparent)"}}>
+        {(data?.flow||[]).map((stage:any)=><button key={stage.key} type="button" onClick={()=>{window.location.href="/pipeline/"+stage.key}} style={{textAlign:"left",border:"1px solid var(--border, #333)",borderRadius:12,padding:14,minWidth:0,background:"var(--panel, transparent)",color:"inherit",cursor:"pointer",font:"inherit"}}>
           <div style={{fontSize:11,letterSpacing:".08em",textTransform:"uppercase",opacity:.65,minHeight:28}}>{stage.label}</div>
           <div style={{fontSize:28,fontWeight:700,lineHeight:1.2,fontVariantNumeric:"tabular-nums"}}>{stage.count}</div>
           <div style={{fontSize:11,opacity:.65,marginTop:6,lineHeight:1.4}}>{stage.detail}</div>
-          {i<6&&<div style={{fontSize:18,opacity:.5,marginTop:8}} aria-hidden="true">↓</div>}
-        </div>)}
+          <div style={{fontSize:11,fontWeight:600,marginTop:12,color:"var(--accent, #a78bfa)"}}>View memes →</div>
+        </button>)}
       </div>
-      <div style={{marginTop:14,fontSize:12,opacity:.7}}>The main path is Discovered → To be processed → Processing → Processed → Approval queue → Scheduled → Published. Rejected, discarded, media-unavailable and low-confidence items end in separate terminal outcomes and stay in your history. Approval, scheduled and published counts are destination assignments, so one meme can count more than once when sent to multiple accounts.</div>
+      <div style={{marginTop:14,fontSize:12,opacity:.7}}>Select any stage to open its meme list. Approval, scheduled and published counts are destination assignments, so a meme can appear more than once when sent to multiple accounts.</div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
         {(data?.flow||[]).filter((x:any)=>["rejected","discarded","media_unavailable","low_confidence"].includes(x.key)).map((stage:any)=><span key={stage.key} className="tag">{stage.label}: {stage.count}</span>)}
       </div>
     </div>
   </>;
+}
+
+
+export function PipelineStage({ stage }: { stage: string }) {
+ const [data,setData]=useState<any>(null); const [error,setError]=useState("");
+ useEffect(()=>{api("/pipeline").then(setData).catch(e=>setError(e.message));},[]);
+ const meta=(data?.flow||[]).find((x:any)=>x.key===stage); const rows:any[]=data?.flowRecords||[]; const assignments:any[]=data?.flowAssignments||[];
+ const terminal=(m:any)=>["discarded","media_unavailable","low_confidence"].includes(m.processing_status||"")||m.classification==="low_confidence";
+ const forMeme=(id:string)=>assignments.filter((a:any)=>a.meme_id===id);
+ let matches:any[]=rows;
+ if(stage==="to_process") matches=rows.filter((m:any)=>(["needs_ocr","ocr_complete","ready_for_asset","failed","processing_failed"].includes(m.processing_status)||["render_failed","renderer_not_configured","render_requested"].includes(m.reel_status||""))&&!terminal(m));
+ else if(stage==="processing") matches=rows.filter((m:any)=>["needs_ocr","ocr_complete","ready_for_asset"].includes(m.processing_status)&&((m.processing_locked_until&&new Date(m.processing_locked_until)>new Date())||(m.reel_render_locked_until&&new Date(m.reel_render_locked_until)>new Date())));
+ else if(stage==="processed") matches=rows.filter((m:any)=>m.processing_status==="generated");
+ else if(stage==="approval") matches=rows.filter((m:any)=>m.processing_status==="generated"&&forMeme(m.id).some((a:any)=>a.approval_status==="pending"));
+ else if(stage==="scheduled") matches=rows.filter((m:any)=>forMeme(m.id).some((a:any)=>a.status==="scheduled"));
+ else if(stage==="published") matches=rows.filter((m:any)=>forMeme(m.id).some((a:any)=>a.status==="published"));
+ else if(stage==="rejected") matches=rows.filter((m:any)=>m.processing_status==="rejected"||forMeme(m.id).some((a:any)=>a.approval_status==="rejected"));
+ else if(stage==="discarded") matches=rows.filter((m:any)=>m.processing_status==="discarded");
+ else if(stage==="media_unavailable") matches=rows.filter((m:any)=>m.processing_status==="media_unavailable");
+ else if(stage==="low_confidence") matches=rows.filter((m:any)=>m.processing_status==="low_confidence"||m.classification==="low_confidence");
+ else if(stage==="discovered") matches=rows;
+ else matches=[];
+ return <><PageHead eyebrow="PIPELINE / STAGE DETAILS" title={meta?.label||"Stage details"} desc={meta?.detail||"Memes in this pipeline stage."} action={<button className="btn secondary" onClick={()=>window.location.href="/pipeline"}>Back to Pipeline</button>}/>{error&&<Notice kind="error">{error}</Notice>}<div className="panel"><div className="panel-head"><div><h3>{matches.length} memes</h3><p>Memes currently matching this stage.</p></div><span className="tag">{meta?.count??matches.length} COUNT</span></div>{!data?<p>Loading…</p>:matches.length===0?<Empty title="No memes in this stage" text="There are currently no matching items."/>:<div className="table-wrap"><table><thead><tr><th>MEME</th><th>PROCESSING</th><th>DESTINATIONS</th><th>CREATED</th></tr></thead><tbody>{matches.map((m:any)=><tr key={m.id}><td><b>{m.source_username?"@"+m.source_username:"Manual"}</b><small>{(m.extracted_text||m.processing_error||"No extracted text").slice(0,110)}</small><small>{m.id}</small></td><td>{m.processing_status}{m.reel_status&&<small>Reel: {m.reel_status}</small>}</td><td>{forMeme(m.id).map((a:any)=>a.approval_status+(a.status&&a.status!=="pending"?" · "+a.status:"")).join(", ")||"—"}</td><td>{m.created_at?new Date(m.created_at).toLocaleString():"—"}</td></tr>)}</tbody></table></div>}</div></>;
 }
