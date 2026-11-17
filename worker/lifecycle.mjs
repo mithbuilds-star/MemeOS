@@ -76,7 +76,7 @@ export function failureOutcome(row, message, nowMs, cfg = DEFAULTS) {
     processing_token: null,
   };
   if (terminal) {
-    return { ...base, processing_status: "discarded", reel_status: row.reel_status === "rendering" || row.reel_status === "render_failed" ? "discarded" : row.reel_status, processing_next_retry_at: null, reel_render_next_retry_at: null, reel_render_locked_until: null, processing_failed_at: new Date(nowMs).toISOString(), _terminal: true, _attempt: attempt };
+    return { ...base, processing_status: "discarded", reel_status: "discarded", processing_next_retry_at: null, reel_render_next_retry_at: null, reel_render_locked_until: null, processing_failed_at: new Date(nowMs).toISOString(), _terminal: true, _attempt: attempt };
   }
   // Keep the current stage: a failed step retries at the same point without regressing progress.
   return { ...base, processing_next_retry_at: new Date(nowMs + backoffMs(consecutive, cfg)).toISOString(), _terminal: false, _attempt: attempt };
