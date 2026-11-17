@@ -851,6 +851,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const memeEdit=p.match(/^\/memes\/([0-9a-f-]+)$/);
   if(memeEdit&&method==="PATCH"){
     const memeId=memeEdit[1];if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
+    const current=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,classification`);
+    if(["discarded","media_unavailable","low_confidence"].includes(current[0]?.processing_status) || current[0]?.classification==="low_confidence")return fail("This item is terminal and cannot be reopened.",409);
     const text=String(body.extracted_text||"").trim();if(!text||text.length>3000)return fail("Meme text must be between 1 and 3000 characters.");
     const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({extracted_text:text,social_caption:null,classification:"needs_review",classification_reason:"Text edited by user. Reclassification and asset regeneration queued.",processing_status:"ocr_complete",processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null,reel_status:"not_started",reel_asset_path:null,reel_asset_url:null,reel_song_id:null})});
     const assignments=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}&select=id`);for(const assignment of assignments)await db(env,"account_meme_assignments",`?id=eq.${assignment.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({approval_status:"pending",status:"pending",scheduled_at:null,publishing_locked_until:null,rejection_reason:"Content text changed; approval reset."})});
@@ -880,6 +882,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const rows:any[]=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=id,processing_status,asset_url,reel_asset_url,reel_status`);
     const m=rows?.[0];
     if(!m)return fail("Meme not found.",404);
+    if(["discarded","media_unavailable","low_confidence"].includes(m.processing_status))return fail("This item is terminal and cannot be converted or rendered again.",409);
     if(format==="photo"){
       await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"photo"})});
       return json({output_format:"photo",ready:!!m.asset_url});
@@ -1111,7 +1114,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const classifyMatch=p.match(/^\/memes\/([0-9a-f-]+)\/classify$/);
   if(classifyMatch&&method==="POST"){
     const memeId=classifyMatch[1];const memes=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=*`);if(!memes.length)return fail("Meme not found.",404);
-    const meme=memes[0];if(!meme.extracted_text?.trim())return fail("Extract text with OCR before classification.");
+    const meme=memes[0];if(["discarded","media_unavailable","low_confidence"].includes(meme.processing_status)||meme.classification==="low_confidence")return fail("This item is terminal and cannot be reclassified.",409);if(!meme.extracted_text?.trim())return fail("Extract text with OCR before classification.");
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.groq&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)return fail("Add and enable a Groq key in Settings → API Manager.",503);
     let result:any=null,lastError="No Groq key could process this request.";
     for(const credential of creds){try{
