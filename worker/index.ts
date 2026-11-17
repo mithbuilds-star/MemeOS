@@ -1192,6 +1192,54 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   }
   return fail("Route not found.",404);
 }
+
+async function scheduleDailyAutoPosts(env:Env,ctx:Ctx,settings:any){
+  if(!settings?.auto_post_enabled||settings?.global_paused)return;
+  const timezone=String(settings.timezone||"Asia/Kolkata");
+  const now=new Date();
+  const parts=new Intl.DateTimeFormat("en-CA",{timeZone:timezone,year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);
+  const part=(type:string)=>parts.find((p:any)=>p.type===type)?.value||"";
+  const date=part("year")+"-"+part("month")+"-"+part("day");
+  const day=new Date(date+"T12:00:00").getDay();
+  const ranked=[
+    ["19:00","18:00","20:00","15:00","16:00","14:00","17:00","21:00","12:00","11:00"],
+    ["19:00","15:00","17:00","16:00","18:00","14:00","13:00","20:00","21:00","12:00"],
+    ["12:00","18:00","20:00","19:00","17:00","15:00","21:00","14:00","11:00","09:00"],
+    ["09:00","08:00","07:00","13:00","12:00","14:00","18:00","19:00","20:00","17:00"],
+    ["22:00","21:00","18:00","16:00","19:00","20:00","17:00","12:00","14:00","15:00"],
+    ["21:00","22:00","20:00","17:00","18:00","19:00","15:00","12:00","14:00","16:00"],
+    ["21:00","22:00","20:00","19:00","18:00","17:00","15:00","14:00","12:00","11:00"]
+  ];
+  const toIso=(time:string)=>{
+    const bits=date.split("-").map(Number),clock=time.split(":").map(Number);
+    const target=Date.UTC(bits[0],bits[1]-1,bits[2],clock[0],clock[1]);
+    let guess=target;
+    for(let n=0;n<3;n++){
+      const p=new Intl.DateTimeFormat("en-US",{timeZone:timezone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(new Date(guess));
+      const v=(t:string)=>Number(p.find((x:any)=>x.type===t)?.value||0);
+      const observed=Date.UTC(v("year"),v("month")-1,v("day"),v("hour"),v("minute"));
+      guess+=target-observed;
+    }
+    return new Date(guess);
+  };
+  const slots=ranked[day].map(t=>toIso(t)).filter(d=>d.getTime()>Date.now()+60000);
+  const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&auto_scheduled=eq.true&scheduled_at=gte.${encodeURIComponent(toIso("00:00").toISOString())}&select=scheduled_at`);
+  const used=new Set((existing||[]).filter((r:any)=>String(r.scheduled_at||"").startsWith(date)).map((r:any)=>new Date(r.scheduled_at).getTime()));
+  const available=slots.filter(d=>!used.has(d.getTime())).slice(0,Math.max(1,Math.min(10,Number(settings.posts_per_day||3))));
+  if(!available.length)return;
+  const queue=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.approved&status=in.(approved,pending)&scheduled_at=is.null&select=id,publish_format,meme_id&order=created_at.desc&limit=20`);
+  let count=0;
+  for(let i=0;i<Math.min(available.length,queue.length);i++){
+    const item=queue[i];
+    if(item.publish_format==="reel"){
+      const meme=await db(env,"memes",`?id=eq.${item.meme_id}&${userFilter(ctx)}&select=reel_status,reel_song_id`);
+      if(meme[0]?.reel_status!=="generated"||!meme[0]?.reel_song_id)continue;
+    }
+    const updated=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&scheduled_at=is.null`,{method:"PATCH",body:JSON.stringify({scheduled_at:available[i].toISOString(),status:"scheduled",auto_scheduled:true})});
+    if(updated?.length)count++;
+  }
+  if(count)console.log("Auto-scheduled daily posts",ctx.userId,count,date);
+}
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url=new URL(req.url);
@@ -1233,11 +1281,12 @@ export default {
     try{await runWaitingReels(env);}catch(e:any){console.error("Reel rendering phase failed",String(e?.message||e));}
     try{const analyticsOwners=await db(env,"user_settings","?select=owner_id,last_analytics_sync_at,global_paused");
       for(const setting of analyticsOwners){if(setting.global_paused)continue;if(setting.last_analytics_sync_at&&Date.now()-new Date(setting.last_analytics_sync_at).getTime()<6*60*60*1000)continue;const ctx:Ctx={userId:setting.owner_id,token:""};try{await syncMetaAnalyticsForOwner(env,ctx);await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_analytics_sync_at:new Date().toISOString()})});}catch{}}}catch(e:any){console.error("Analytics sync phase failed",String(e?.message||e));}
+    try{const autoOwners=await db(env,"user_settings","?auto_post_enabled=eq.true&global_paused=eq.false&select=owner_id,auto_post_enabled,posts_per_day,timezone,global_paused");for(const setting of autoOwners){const ctx:Ctx={userId:setting.owner_id,token:""};try{await scheduleDailyAutoPosts(env,ctx,setting)}catch(e:any){console.error("Daily auto-scheduling failed",setting.owner_id,String(e?.message||e));}}}catch(e:any){console.error("Daily auto-scheduling scan failed",String(e?.message||e));}
     const expiredPublishing=await db(env,"account_meme_assignments",`?status=eq.publishing&publishing_locked_until=lt.${encodeURIComponent(now)}&select=id,owner_id&limit=50`);
     for(const item of expiredPublishing){const ctx:Ctx={userId:item.owner_id,token:""};await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.publishing`,{method:"PATCH",body:JSON.stringify({status:"needs_review",publishing_locked_until:null,rejection_reason:"Publishing worker lease expired. Check Instagram before retrying to avoid a duplicate post."})});}
     const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id,auto_scheduled&order=scheduled_at.asc&limit=25`);
     for(const item of due){
-      const ctx:Ctx={userId:item.owner_id,token:""};const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)continue;
+      const ctx:Ctx={userId:item.owner_id,token:""};const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_post_enabled`);if(settings[0]?.global_paused||(item.auto_scheduled&&!settings[0]?.auto_post_enabled))continue;
       const lease=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.scheduled&approval_status=eq.approved&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({status:"publishing",publishing_started_at:now,publishing_locked_until:new Date(Date.now()+10*60*1000).toISOString()})});
       if(lease?.length){try{await publishAssignment(env,item);}catch(e:any){console.error("Scheduled publish failed",item.id,String(e?.message||e));}}
     }
