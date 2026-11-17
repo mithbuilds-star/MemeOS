@@ -81,7 +81,7 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
       </button>
       {open && (
         <div className="dd-menu" id={listId} role="listbox" aria-label={placeholder}>
-          {options.length > 8 && (
+          {displayOptions.length > 8 && (
             <div className="dd-search-wrap">
               <Search size={14} />
               <input
