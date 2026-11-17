@@ -3,7 +3,7 @@ import { Check, ChevronDown, Search } from "lucide-react";
 
 export type SelectOption = { value: string; label: string };
 
-export function Select({ value, onChange, options, placeholder = "Select", disabled = false, defaultValue, defaultLabel }: {
+export function Select({ value, onChange, options, placeholder = "Select", disabled = false, defaultValue, defaultLabel, searchable = true }: {
   value: string;
   onChange: (value: string) => void;
   options: SelectOption[];
@@ -11,6 +11,7 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
   disabled?: boolean;
   defaultValue?: string;
   defaultLabel?: string;
+  searchable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -81,7 +82,7 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
       </button>
       {open && (
         <div className="dd-menu" id={listId} role="listbox" aria-label={placeholder}>
-          {displayOptions.length > 8 && (
+          {searchable && displayOptions.length > 8 && (
             <div className="dd-search-wrap">
               <Search size={14} />
               <input
