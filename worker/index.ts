@@ -107,7 +107,11 @@ function normalizeApifyItem(item: any) {
   const image = firstString(item,["displayUrl","display_url","imageUrl","image_url","images.0.url","thumbnailUrl"]);
   const caption = firstString(item,["caption","text","description","alt"]);
   const type = firstString(item,["type","productType","mediaType"]) || "IMAGE";
-  return { username, permalink, postId, image, caption, type };
+  const rawDate = item?.takenAt ?? item?.timestamp ?? item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
+  let postedAt:string|null=null;
+  if(typeof rawDate==="number"&&Number.isFinite(rawDate))postedAt=new Date(rawDate<1000000000000?rawDate*1000:rawDate).toISOString();
+  else if(typeof rawDate==="string"&&rawDate.trim()){const parsed=new Date(rawDate);if(!Number.isNaN(parsed.getTime()))postedAt=parsed.toISOString();}
+  return { username, permalink, postId, image, caption, type, postedAt };
 }
 async function assignDiscoveredMeme(env:Env,ctx:Ctx,memeId:string,sourceId:string|null){
   const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,discovery_enabled`);
@@ -172,8 +176,15 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   }
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
-  const itemsRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=200`);
-  const items:any[]=await itemsRes.json();
+  // Read the complete dataset in pages; the actor can return up to 10,000
+  // results per profile and the default API page must not silently truncate it.
+  const items:any[]=[];
+  for(let offset=0;offset<10000;offset+=1000){
+    const itemsRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=1000&offset=${offset}`);
+    const page:any[]=await itemsRes.json();
+    items.push(...page);
+    if(page.length<1000)break;
+  }
   // Import the full date-filtered dataset; source_post_id deduplication handles overlaps.
   const batch=items;
   let inserted = 0, skipped = 0, failedMedia = 0;
@@ -202,10 +213,43 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:n.postId,source_permalink:n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl};
     try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch { skipped++; }
   }
+  const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];
+  // Only the incremental pass advances the successful cursor. A historical
+  // backfill is deliberately independent and must never move it backwards.
+  if(job.metadata?.phase!=="backfill"){
+    const cursorAt=job.created_at||new Date().toISOString();
+    for(const username of sourceNames){
+      const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);
+      for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});
+    }
+  }
+  // Fewer than five recent posts means this source is likely quiet or its
+  // previous cursor was advanced past older content. Start one bounded historical
+  // pass ending at the oldest post returned by the incremental scrape.
+  if(job.metadata?.phase!=="backfill"&&items.length<SCRAPE_BACKFILL_THRESHOLD&&items.length>0){
+    const dated=items.map((item:any)=>normalizeApifyItem(item).postedAt).filter((v:any)=>!!v).map((v:string)=>new Date(v).getTime()).filter((v:number)=>Number.isFinite(v));
+    if(dated.length){
+      const oldest=new Date(Math.min(...dated)).toISOString();
+      const credentialRows=await db(env,"api_credentials",`?id=eq.${encodeURIComponent(String(job.metadata?.credential_id||""))}&${userFilter(ctx)}&select=*`);
+      const credential=credentialRows?.[0];
+      if(credential&&credential.enabled!==false){
+        try{
+          const secret=await decryptSecret(env,credential);
+          const actorId=credential.actor_id||DEFAULT_APIFY_ACTOR;
+          const actor=encodeURIComponent(actorId.replace("/","~"));
+          const backfillInput=buildActorInput(credential.actor_input,sourceNames,actorId,10000,null,oldest);
+          const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(backfillInput)});
+          const result:any=await response.json().catch(()=>({}));
+          if(!response.ok)throw new Error(result.error?.message||`Apify backfill returned ${response.status}.`);
+          await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:sourceNames,source_reference_account_id:job.metadata?.source_reference_account_id,scheduled:job.metadata?.scheduled,phase:"backfill",backfill_before:oldest,backfill_for_job_id:job.id}})});
+          LOG("discovery_backfill_started",{source_usernames:sourceNames,items_seen:items.length,backfill_before:oldest});
+        }catch(e:any){
+          LOG("discovery_backfill_start_failed",{source_usernames:sourceNames,error:String(e?.message||e).slice(0,300)});
+        }
+      }
+    }
+  }
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,inserted,skipped,failed_media:failedMedia}})});
-  // Anchor the next cursor to run creation, not delayed import completion, so posts
-  // published while a run is executing or awaiting polling are rechecked next time.
-  const cursorAt=job.created_at||new Date().toISOString();const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];for(const username of sourceNames){const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});}
   await refreshAllCredentialUsage(env,ctx);
   await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
   return {done:true,status:"SUCCEEDED",items_seen:items.length,inserted,skipped,failed_media:failedMedia};
@@ -509,7 +553,7 @@ async function runWaitingReels(env:Env){
 }
 
 const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
-const SCRAPE_BATCH=20;
+const SCRAPE_BATCH=10000;\nconst SCRAPE_BACKFILL_THRESHOLD=5;
 
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false){
   let lastError="No Apify key could start the run.";
@@ -518,12 +562,10 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
     try{
       const secret=await decryptSecret(env,credential);
       const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));
-      // Re-scan a rolling 24-hour trend window on every run instead of using the
-      // last-run cursor. This catches recent posts even if a run was delayed or
-      // the prior cursor advanced too far; source_post_id deduplication prevents
-      // the overlapping window from creating duplicate memes.
-      const recentWindowStart=new Date(Date.now()-24*60*60*1000).toISOString();
-      const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,recentWindowStart);
+      // Incremental scan starts at this source's last successfully completed scrape.
+      // A large per-profile cap lets us accurately decide whether a historical
+      // backfill is needed instead of mistaking a capped result set for <5 posts.
+      const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,source.last_scraped_at||null);
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
@@ -543,7 +585,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
   }
   throw new Error(`@${source.username}: ${lastError}`);
 }
-function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null){
+function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null,olderThan?:string|null){
   const input=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
   const replace=(value:any):any=>{
     if(typeof value==="string"){if(value==="{{usernames}}")return usernames;if(value==="{{profile_urls}}")return usernames.map(u=>`https://www.instagram.com/${u.replace(/^@/,"")}/`);if(value==="{{start_urls}}")return usernames.map(u=>({url:`https://www.instagram.com/${u.replace(/^@/,"")}/`}));return value;}
@@ -567,6 +609,13 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
     // return timezone offsets such as +00:00, which its input validator rejects.
     const parsed=new Date(newerThan);
     if(!Number.isNaN(parsed.getTime()))result.onlyPostsNewerThan=parsed.toISOString().replace(/\.\d{3}Z$/,"Z");
+  }
+  if(olderThan){
+    const parsed=new Date(olderThan);
+    if(!Number.isNaN(parsed.getTime())){
+      delete result.onlyPostsNewerThan;
+      result.onlyPostsOlderThan=parsed.toISOString().replace(/\.\d{3}Z$/,"Z");
+    }
   }
   return result;
 }
