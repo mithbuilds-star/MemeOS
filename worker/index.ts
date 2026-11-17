@@ -518,7 +518,12 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
     try{
       const secret=await decryptSecret(env,credential);
       const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));
-      const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,source.last_scraped_at||null);
+      // Re-scan a rolling 24-hour trend window on every run instead of using the
+      // last-run cursor. This catches recent posts even if a run was delayed or
+      // the prior cursor advanced too far; source_post_id deduplication prevents
+      // the overlapping window from creating duplicate memes.
+      const recentWindowStart=new Date(Date.now()-24*60*60*1000).toISOString();
+      const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,recentWindowStart);
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
