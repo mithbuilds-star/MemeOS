@@ -433,7 +433,7 @@ async function runWaitingReels(env:Env){
     const ctx:Ctx={userId:m.owner_id,token:""};
     const msg="The GitHub render did not report back within 30 minutes.";
     const {_terminal,_attempt,...patch}=L.failureOutcome(m,msg,Date.now());
-    const body:any={...patch,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:msg,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})};
+    const body:any={...patch,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:_terminal?null:patch.processing_next_retry_at,reel_render_locked_until:null,processing_error:msg,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})};
     const rows=await db(env,"memes",`?id=eq.${encodeURIComponent(m.id)}&${userFilter(ctx)}&reel_status=eq.rendering`,{method:"PATCH",body:JSON.stringify(body)});
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
@@ -458,7 +458,7 @@ async function runWaitingReels(env:Env){
       if(e instanceof LostOwnership){LOG("lost_ownership_discarded",{meme_id:meme.id,reason:e.message});continue;}
       const out=L.failureOutcome(meme,e?.message||e,Date.now());
       const {_terminal,_attempt,...p}=out;
-      await memeWrite(env,ctx,meme.id,leaseToken,{...p,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})}).catch(()=>{});
+      await memeWrite(env,ctx,meme.id,leaseToken,{...p,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:_terminal?null:p.processing_next_retry_at,reel_render_locked_until:null,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})}).catch(()=>{});
       LOG("render_dispatch_failed",{meme_id:meme.id,attempt:_attempt,new_status:_terminal?"discarded":"retry_wait",reason:String(e?.message||e).slice(0,200)});
     }
   }
@@ -1101,7 +1101,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   if(processMatch&&method==="POST"){
     const memeId=processMatch[1];const rows=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("Meme not found.",404);
     const meme=rows[0];
-    if (["discarded","media_unavailable","low_confidence","rejected"].includes(meme.processing_status) || meme.classification === "low_confidence") return fail("This item is terminal and cannot be retried.",409);
+    if (["discarded","media_unavailable","low_confidence"].includes(meme.processing_status) || meme.classification === "low_confidence") return fail("This item is terminal and cannot be retried.",409);
     const next=meme.classification==="suitable"&&meme.extracted_text?"ready_for_asset":meme.extracted_text?"ocr_complete":"needs_ocr";
     const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_status:next,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null})});
     // Reprocessing produces a new image, so every destination goes back to the approval queue.
