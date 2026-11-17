@@ -217,6 +217,8 @@ export function Scheduler() {
   const [autoPost,setAutoPost]=useState(false);
   const [postsPerDay,setPostsPerDay]=useState(3);
   const [autoBusy,setAutoBusy]=useState(false);
+  const [captionBusy,setCaptionBusy]=useState(false);
+  const [captionStatus,setCaptionStatus]=useState("");
   const [calendarOpen,setCalendarOpen]=useState<string|null>(null);
   const [calendarMonth,setCalendarMonth]=useState(new Date());
   const load=()=>api("/assignments").then(r=>setItems((r.assignments||[]).filter((x:any)=>x.status==="scheduled"||(x.approval_status==="approved"&&!x.scheduled_at&&!["published","rejected","failed","needs_review"].includes(x.status))))).catch(e=>setError(e.message));
@@ -225,7 +227,8 @@ export function Scheduler() {
   const timeOptions=Array.from({length:48},(_,n)=>{const h=Math.floor(n/2),m=n%2?30:0;return String(h).padStart(2,"0")+":"+String(m).padStart(2,"0")});
   const schedule=async(id:string)=>{setBusy(id);setError("");try{const value=times[id];if(!value?.date||!value?.time)throw new Error("Choose both a date and time.");const local=new Date(value.date+"T"+value.time+":00");if(Number.isNaN(local.getTime())||local.getTime()<=Date.now())throw new Error("Choose a future date and time.");await api("/assignments/"+id,{method:"PATCH",body:JSON.stringify({scheduled_at:local.toISOString()})});await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};
   const cancel=async(id:string)=>{setBusy(id);setError("");try{await api("/assignments/"+id,{method:"PATCH",body:JSON.stringify({scheduled_at:null})});await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};
-  const saveCaption=async(id:string)=>{setBusy(id);setError("");try{await api("/memes/"+id+"/caption",{method:"PATCH",body:JSON.stringify({social_caption:captionDraft})});setEditingCaption(null);await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};
+  const saveCaption=async(id:string)=>{setBusy(id);setError("");try{await api("/memes/"+id+"/caption",{method:"PATCH",body:JSON.stringify({social_caption:captionDraft})});setEditingCaption(null);await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};  const missingCaptionIds=Array.from(new Set(items.filter(i=>!String(i.memes?.social_caption||"").trim()&&(String(i.memes?.extracted_text||"").trim()||String(i.memes?.original_caption||"").trim())).map(i=>i.meme_id)));
+  const backfillCaptions=async()=>{if(captionBusy||!missingCaptionIds.length)return;setCaptionBusy(true);setCaptionStatus("");setError("");let total=0,remaining=missingCaptionIds.length,rounds=0,failed=false;try{while(remaining>0&&rounds<60){rounds++;const result=await api("/captions/backfill",{method:"POST",body:JSON.stringify({meme_ids:missingCaptionIds})});total+=Number(result.generated||0);remaining=Number(result.remaining||0);setCaptionStatus("Generated "+total+" caption(s). "+remaining+" remaining…");if(!result.generated&&remaining>0){failed=true;break;}}await load();setCaptionStatus(total?"Generated "+total+" missing caption(s)."+(failed?" Some could not be generated; check the Groq key or meme text and retry.":remaining?" More posts remain; click again to continue.":""):"No captions were generated. Check that a Groq key is enabled and the memes have readable text.");}catch(e:any){setCaptionStatus(e.message||"Caption backfill failed.");}finally{setCaptionBusy(false);}};
   const bestTimes=(date:string)=>{
     const day=new Date(date+"T12:00:00").getDay();
     const ranked=[
@@ -242,7 +245,7 @@ export function Scheduler() {
     const used=new Set(booked.map(i=>{const d=new Date(i.scheduled_at);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}));
     const alreadyAuto=booked.filter(i=>i.auto_scheduled).length;
     const remaining=Math.max(0,postsPerDay-alreadyAuto);
-    return ranked[day].filter(t=>new Date(date+"T"+t+":00").getTime()>now.getTime()+60000&&!used.has(t)).slice(0,remaining);
+    return ranked[day].slice().sort().filter(t=>new Date(date+"T"+t+":00").getTime()>now.getTime()+60000&&!used.has(t)).slice(0,remaining);
   };
   const toggleAuto=async()=>{
     if(autoBusy)return;
@@ -273,14 +276,16 @@ export function Scheduler() {
   return <><PageHead eyebrow="PUBLISHING WORKFLOW" title="Scheduler" desc="Plan your approved memes and let BRATLOOP publish at the selected times."/>
     <div className="panel scheduler-panel">
       <div className="panel-head scheduler-topbar">
-        <div><h3>Approved content & upcoming schedule</h3><p>Auto-post fills today's strongest posting windows, in queue order.</p></div>
+        <div><h3>Approved content & upcoming schedule</h3><p>Auto-post assigns the newest approved posts to ascending time slots, then continues across the next 30 days.</p></div>
         <div className="scheduler-auto-controls">
           <div className="posts-per-day"><span>POSTS / DAY</span><Select value={String(postsPerDay)} onChange={async(v:string)=>{const n=Number(v);setPostsPerDay(n);try{await api("/settings",{method:"PATCH",body:JSON.stringify({posts_per_day:n})})}catch(err:any){setError(err.message)}}} placeholder="Posts per day" defaultValue="3" defaultLabel="3× · Default" options={Array.from({length:10},(_,i)=>({value:String(i+1),label:(i+1)+"×"}))}/></div>
           <button className={"auto-post-toggle "+(autoPost?"enabled":"")} onClick={toggleAuto} disabled={autoBusy}><span className="auto-toggle-track"><i/></span><span>{autoBusy?"Applying…":autoPost?"Auto-post on":"Auto-post off"}</span></button>
         </div>
       </div>
-      <div className="scheduler-auto-note">{autoPost?"Auto-post is active. Turning it off pauses auto-filled posts without clearing their scheduled times.":"Turn on Auto-post to fill the next available recommended times for your top approved posts."}</div>
+      <div className="scheduler-auto-note">{autoPost?"Auto-post is active. Turning it off pauses auto-filled posts without clearing their scheduled times.":"Turn on Auto-post to fill all approved posts in queue order, cycling through daily posting slots across a rolling 30-day schedule."}</div>
       <div className="scheduler-count-row"><span>{items.filter(i=>i.scheduled_at).length} scheduled</span><span>{items.filter(i=>i.approval_status==="approved"&&!i.scheduled_at).length} ready to schedule</span></div>
+      {missingCaptionIds.length>0&&<div className="scheduler-caption-backfill"><span>{missingCaptionIds.length} post(s) missing captions</span><button className="btn small secondary" onClick={backfillCaptions} disabled={captionBusy}>{captionBusy?<Loader2 className="spin" size={14}/>:<Sparkles size={14}/>} {captionBusy?"Generating…":"Generate missing captions"}</button></div>}
+      {captionStatus&&<Notice kind="info">{captionStatus}</Notice>}
       {error&&<Notice kind="warn">{error}</Notice>}
       {items.length===0?<Empty title="No approved content" text="Approve content in the queue and it will appear here for scheduling."/>:<div className="scheduler-list">{items.map(i=>{
         const value=times[i.id]||{date:"",time:"18:00"};
