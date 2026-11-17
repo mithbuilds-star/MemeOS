@@ -1293,6 +1293,45 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const rows=await db(env,"api_credentials",`?id=eq.${credentialMatch[1]}&${userFilter(ctx)}&select=id`);if(!rows.length)return fail("API key not found.",404);
     await db(env,"api_credentials",`?id=eq.${credentialMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});return json({ok:true});
   }
+  const usageMatch=p.match(/^\/api-credentials\/([0-9a-f-]+)\/usage$/);
+  if(usageMatch&&method==="POST"){
+    const rows=await db(env,"api_credentials",`?id=eq.${usageMatch[1]}&${userFilter(ctx)}&select=*`);
+    if(!rows.length)return fail("API key not found.",404);
+    const row=rows[0];
+    if(!row.enabled)return fail("Enable this API key before refreshing its usage.",400);
+    const secret=await decryptSecret(env,row);
+    if(row.provider==="apify"){
+      const response=await fetch("https://api.apify.com/v2/users/me/limits",{headers:{Authorization:`Bearer ${secret}`}});
+      const data:any=await response.json().catch(()=>({}));
+      if(!response.ok){
+        const status=credentialFailureStatus(response.status,row.status);
+        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status,cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});
+        return fail(data.error?.message||`Apify usage lookup failed (${response.status}).`,response.status);
+      }
+      await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+      const d=data.data||{};
+      return json({provider:"apify",refreshed_at:new Date().toISOString(),usage:{used_usd:d.current?.monthlyUsageUsd??null,limit_usd:d.limits?.maxMonthlyUsageUsd??null,used_compute_units:d.current?.monthlyActorComputeUnits??null,limit_compute_units:d.limits?.maxMonthlyActorComputeUnits??null,cycle_start:d.monthlyUsageCycle?.startAt??null,cycle_end:d.monthlyUsageCycle?.endAt??null}});
+    }
+    if(row.provider==="groq"){
+      const response=await fetch("https://api.groq.com/openai/v1/models",{headers:{Authorization:`Bearer ${secret}`}});
+      const h=response.headers;
+      const numberHeader=(name:string)=>{const value=h.get(name);if(value===null)return null;const n=Number(value);return Number.isFinite(n)?n:null;};
+      const rateLimited=response.status===429||numberHeader("x-ratelimit-remaining-requests")===0||numberHeader("x-ratelimit-remaining-tokens")===0;
+      if(response.status===401||response.status===403){
+        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:new Date().toISOString()})});
+        return fail("Groq rejected this API key. Check the key in API Manager.",response.status);
+      }
+      if(response.status===429){
+        const retryAfter=Number(h.get("retry-after"));
+        const cooldownMs=Number.isFinite(retryAfter)&&retryAfter>0?retryAfter*1000:60000;
+        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+cooldownMs).toISOString(),last_used_at:new Date().toISOString()})});
+      }else if(response.ok){
+        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+      }
+      return json({provider:"groq",refreshed_at:new Date().toISOString(),rate_limited:rateLimited,request_limit:numberHeader("x-ratelimit-limit-requests"),request_remaining:numberHeader("x-ratelimit-remaining-requests"),request_reset:h.get("x-ratelimit-reset-requests"),token_limit:numberHeader("x-ratelimit-limit-tokens"),token_remaining:numberHeader("x-ratelimit-remaining-tokens"),token_reset:h.get("x-ratelimit-reset-tokens"),retry_after:h.get("retry-after"),http_status:response.status});
+    }
+    return fail("Unsupported API provider.",400);
+  }
   const testMatch=p.match(/^\/api-credentials\/([0-9a-f-]+)\/test$/);
   if(testMatch&&method==="POST"){
     const rows=await db(env,"api_credentials",`?id=eq.${testMatch[1]}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("API key not found.",404);
