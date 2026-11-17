@@ -77,7 +77,7 @@ async function decryptSecret(env: Env, row: any): Promise<string> {
 }
 function credentialFailureStatus(status:number,currentStatus?:string){if(status===429)return "rate_limited";if(status===401||status===403)return "error";return currentStatus||"untested";}
 function credentialView(row: any) {
-  return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null),enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at};
+  return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null),enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at,usage_snapshot:row.usage_snapshot||null,usage_refreshed_at:row.usage_refreshed_at||null};
 }
 
 function userFilter(ctx: Ctx) { return `owner_id=eq.${encodeURIComponent(ctx.userId)}`; }
@@ -194,6 +194,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // Anchor the next cursor to run creation, not delayed import completion, so posts
   // published while a run is executing or awaiting polling are rechecked next time.
   const cursorAt=job.created_at||new Date().toISOString();const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];for(const username of sourceNames){const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});}
+  await refreshAllCredentialUsage(env,ctx);
   await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
   return {done:true,status:"SUCCEEDED",items_seen:items.length,inserted,skipped,failed_media:failedMedia};
 }
@@ -579,13 +580,50 @@ async function syncMetaAnalyticsForOwner(env:Env,ctx:Ctx){
   for(const row of history){try{await syncMetaAnalyticsForHistory(env,{...row,owner_id:ctx.userId});synced++;}catch(e:any){failed++;await db(env,"publishing_history",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({analytics_sync_error:String(e?.message||e).slice(0,500)})});}}
   return {synced,failed};
 }
+
+async function refreshCredentialUsage(env:Env,ctx:Ctx,row:any){
+  const refreshedAt=new Date().toISOString();
+  const secret=await decryptSecret(env,row);
+  let snapshot:any;
+  if(row.provider==="apify"){
+    const response=await fetch("https://api.apify.com/v2/users/me/limits",{headers:{Authorization:`Bearer ${secret}`}});
+    const data:any=await response.json().catch(()=>({}));
+    if(!response.ok)throw new Error(data.error?.message||`Apify usage lookup failed (${response.status}).`);
+    const d=data.data||{};
+    snapshot={provider:"apify",refreshed_at:refreshedAt,usage:{used_usd:d.current?.monthlyUsageUsd??null,limit_usd:d.limits?.maxMonthlyUsageUsd??null,used_compute_units:d.current?.monthlyActorComputeUnits??null,limit_compute_units:d.limits?.maxMonthlyActorComputeUnits??null,cycle_start:d.monthlyUsageCycle?.startAt??null,cycle_end:d.monthlyUsageCycle?.endAt??null}};
+  }else if(row.provider==="groq"){
+    // Rate-limit headers are returned on inference responses, not reliably by /models.
+    const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",messages:[{role:"user",content:"Reply with OK."}],max_completion_tokens:1,temperature:0})});
+    const h=response.headers;
+    const numberHeader=(name:string)=>{const value=h.get(name);if(value===null)return null;const n=Number(value);return Number.isFinite(n)?n:null;};
+    const limited=response.status===429||numberHeader("x-ratelimit-remaining-requests")===0||numberHeader("x-ratelimit-remaining-tokens")===0;
+    if(!response.ok&&response.status!==429)throw new Error(`Groq usage check failed (${response.status}): ${(await response.text()).slice(0,180)}`);
+    snapshot={provider:"groq",refreshed_at:refreshedAt,rate_limited:limited,request_limit:numberHeader("x-ratelimit-limit-requests"),request_remaining:numberHeader("x-ratelimit-remaining-requests"),request_reset:h.get("x-ratelimit-reset-requests"),token_limit:numberHeader("x-ratelimit-limit-tokens"),token_remaining:numberHeader("x-ratelimit-remaining-tokens"),token_reset:h.get("x-ratelimit-reset-tokens"),retry_after:h.get("retry-after"),http_status:response.status};
+  }else return null;
+  const limited=row.provider==="groq"&&snapshot.rate_limited;
+  const retryAfter=Number(snapshot.retry_after);
+  await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({usage_snapshot:snapshot,usage_refreshed_at:refreshedAt,status:limited?"rate_limited":"connected",cooldown_until:limited?new Date(Date.now()+(Number.isFinite(retryAfter)&&retryAfter>0?retryAfter*1000:60000)).toISOString():null,last_used_at:refreshedAt})});
+  return snapshot;
+}
+async function refreshAllCredentialUsage(env:Env,ctx:Ctx){
+  const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&enabled=eq.true&select=*`);
+  for(const credential of credentials){try{await refreshCredentialUsage(env,ctx,credential);}catch(error:any){console.error("Credential usage refresh failed",credential.provider,credential.label,String(error?.message||error));}}
+}
+
 async function runScheduledDiscovery(env:Env){
   const active=await db(env,"instagram_accounts","?discovery_enabled=eq.true&select=owner_id");
   const owners=[...new Set(active.map((a:any)=>a.owner_id))].slice(0,1);const now=Date.now();
   for(const ownerId of owners){
     const ctx:Ctx={userId:ownerId,token:""};
     const settingsRows=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,discovery_interval_minutes,last_discovery_started_at`);
-    const settings=settingsRows[0]||{};if(settings.global_paused)continue;
+    const settings=settingsRows[0]||{};
+    const indiaDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+    if(settings.last_usage_refresh_date!==indiaDate){
+      await refreshAllCredentialUsage(env,ctx);
+      if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_usage_refresh_date:indiaDate})});
+      else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,last_usage_refresh_date:indiaDate})});
+    }
+    if(settings.global_paused)continue;
     const interval=Math.max(15,Number(settings.discovery_interval_minutes||60));
     if(settings.last_discovery_started_at&&now-new Date(settings.last_discovery_started_at).getTime()<interval*60000)continue;
     const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&discovery_enabled=eq.true&select=id`);if(!accounts.length)continue;
@@ -1297,40 +1335,9 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   if(usageMatch&&method==="POST"){
     const rows=await db(env,"api_credentials",`?id=eq.${usageMatch[1]}&${userFilter(ctx)}&select=*`);
     if(!rows.length)return fail("API key not found.",404);
-    const row=rows[0];
-    if(!row.enabled)return fail("Enable this API key before refreshing its usage.",400);
-    const secret=await decryptSecret(env,row);
-    if(row.provider==="apify"){
-      const response=await fetch("https://api.apify.com/v2/users/me/limits",{headers:{Authorization:`Bearer ${secret}`}});
-      const data:any=await response.json().catch(()=>({}));
-      if(!response.ok){
-        const status=credentialFailureStatus(response.status,row.status);
-        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status,cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});
-        return fail(data.error?.message||`Apify usage lookup failed (${response.status}).`,response.status);
-      }
-      await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
-      const d=data.data||{};
-      return json({provider:"apify",refreshed_at:new Date().toISOString(),usage:{used_usd:d.current?.monthlyUsageUsd??null,limit_usd:d.limits?.maxMonthlyUsageUsd??null,used_compute_units:d.current?.monthlyActorComputeUnits??null,limit_compute_units:d.limits?.maxMonthlyActorComputeUnits??null,cycle_start:d.monthlyUsageCycle?.startAt??null,cycle_end:d.monthlyUsageCycle?.endAt??null}});
-    }
-    if(row.provider==="groq"){
-      const response=await fetch("https://api.groq.com/openai/v1/models",{headers:{Authorization:`Bearer ${secret}`}});
-      const h=response.headers;
-      const numberHeader=(name:string)=>{const value=h.get(name);if(value===null)return null;const n=Number(value);return Number.isFinite(n)?n:null;};
-      const rateLimited=response.status===429||numberHeader("x-ratelimit-remaining-requests")===0||numberHeader("x-ratelimit-remaining-tokens")===0;
-      if(response.status===401||response.status===403){
-        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:new Date().toISOString()})});
-        return fail("Groq rejected this API key. Check the key in API Manager.",response.status);
-      }
-      if(response.status===429){
-        const retryAfter=Number(h.get("retry-after"));
-        const cooldownMs=Number.isFinite(retryAfter)&&retryAfter>0?retryAfter*1000:60000;
-        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+cooldownMs).toISOString(),last_used_at:new Date().toISOString()})});
-      }else if(response.ok){
-        await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
-      }
-      return json({provider:"groq",refreshed_at:new Date().toISOString(),rate_limited:rateLimited,request_limit:numberHeader("x-ratelimit-limit-requests"),request_remaining:numberHeader("x-ratelimit-remaining-requests"),request_reset:h.get("x-ratelimit-reset-requests"),token_limit:numberHeader("x-ratelimit-limit-tokens"),token_remaining:numberHeader("x-ratelimit-remaining-tokens"),token_reset:h.get("x-ratelimit-reset-tokens"),retry_after:h.get("retry-after"),http_status:response.status});
-    }
-    return fail("Unsupported API provider.",400);
+    const row=rows[0];if(!row.enabled)return fail("Enable this API key before refreshing its usage.",400);
+    try{const snapshot=await refreshCredentialUsage(env,ctx,row);return json(snapshot||{});}
+    catch(e:any){return fail(e?.message||"Usage refresh failed.",502);}
   }
   const testMatch=p.match(/^\/api-credentials\/([0-9a-f-]+)\/test$/);
   if(testMatch&&method==="POST"){
