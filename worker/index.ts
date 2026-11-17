@@ -1042,7 +1042,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       }
     };
     const itemsWithWhy = items.map((r: any) => ({ ...r, why:explain(r) }));
-    return json({ counts:{processing,reel}, renderer, items:itemsWithWhy, stages, running, queued, flow, total, retry_wait:retryWaitRows.length });
+    return json({ counts:{processing,reel}, renderer, items:itemsWithWhy, stages, running, queued, flow, flowRecords:rows, flowAssignments:assignments, total, retry_wait:retryWaitRows.length });
   }
   const discardMatch=p.match(/^\/memes\/([0-9a-f-]+)\/discard$/);
   if(discardMatch&&method==="POST"){
