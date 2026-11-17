@@ -212,13 +212,13 @@ async function generateCaptionWithGroq(env:Env,ctx:Ctx,meme:any):Promise<string>
       const secret=await decryptSecret(env,credential);
       const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+secret,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0.8,response_format:{type:"json_object"},messages:[
         {role:"system",content:"Write a tiny Instagram meme caption based on the meme text. Return JSON only: {\"caption\":\"...\"}. The caption MUST be one or two words only, lowercase, casual internet slang/reaction language (examples: real, relatable, fr, ong, literally me, too real). Do not use hashtags, emojis, sentences, explanations, quotes, or more than two words. Pick a natural reaction that fits the joke; do not merely repeat the meme text."},
-        {role:"user",content:"Meme text:\\n"+source.slice(0,3000)}
+        {role:"user",content:"Meme text:\n"+source.slice(0,3000)}
       ]})});
       const data:any=await response.json().catch(()=>({}));
       if(!response.ok){lastError=data.error?.message||"Groq returned "+response.status+".";await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
       const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}");
-      const caption=String(parsed.caption||"").trim().toLowerCase().replace(/^["\']+|["\']+$/g,"").replace(/[.!?,;:]+$/g,"").replace(/\\s+/g," ");
-      if(!/^[a-z0-9][a-z0-9'_-]*(?:\\s+[a-z0-9][a-z0-9'_-]*)?$/.test(caption))throw new Error("AI returned a caption that was not one or two words. Try approving again.");
+      const caption=String(parsed.caption||"").trim().toLowerCase().replace(/^["']+|["']+$/g,"").replace(/[.!?,;:]+$/g,"").replace(/\s+/g," ");
+      if(!/^[a-z0-9][a-z0-9'_-]*(?:\s+[a-z0-9][a-z0-9'_-]*)?$/.test(caption))throw new Error("AI returned a caption that was not one or two words. Try approving again.");
       await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
       return caption;
     }catch(e:any){lastError=e.message||lastError;}
