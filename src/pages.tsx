@@ -149,7 +149,18 @@ export function Discovery() {
   </>;
 }
 
-function mediaFileType(m:any):"posts"|"reels"|null { const urls=[m.reel_asset_url,m.asset_url].filter((v:any)=>typeof v==="string"&&v.trim()); if(urls.some((url:string)=>/\.mp4(?:$|[?#])/i.test(url)))return "reels"; if(urls.some((url:string)=>/\.jpe?g(?:$|[?#])/i.test(url)))return "posts"; return null; }
+function mediaFileType(m:any):"posts"|"reels"|null {
+  // output_format is the selected publishing format and must win over leftover
+  // poster/video assets from a previous conversion.
+  if(m.output_format==="reel")return "reels";
+  if(m.output_format==="photo")return "posts";
+  const reelUrl=typeof m.reel_asset_url==="string"?m.reel_asset_url:"";
+  if(reelUrl&&(/\.mp4(?:$|[?#])/i.test(reelUrl)||m.reel_status==="generated"))return "reels";
+  const assetUrl=typeof m.asset_url==="string"?m.asset_url:"";
+  if(assetUrl&&/\.(?:jpe?g|png|webp)(?:$|[?#])/i.test(assetUrl))return "posts";
+  if(assetUrl&&/\.mp4(?:$|[?#])/i.test(assetUrl))return "reels";
+  return null;
+}
 function useMemes() { const [memes,setMemes]=useState<Meme[]>([]);const [error,setError]=useState("");const requested=useRef(0);const applied=useRef(0);const load=()=>{const mine=++requested.current;return api("/memes").then(r=>{if(mine>applied.current){applied.current=mine;setMemes(r.memes||[]);}}).catch(e=>{if(mine>applied.current)setError(e.message);});};useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer)},[]);return {memes,error,load}; }
 export function Queue() {
   const {memes,error,load}=useMemes();const [busy,setBusy]=useState("");const [message,setMessage]=useState("");const [autoProcess,setAutoProcess]=useState(true);const [paused,setPaused]=useState(false);
