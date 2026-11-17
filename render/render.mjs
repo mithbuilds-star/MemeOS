@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm, stat, copyFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -161,7 +161,7 @@ async function main() {
     const source = path.join(dir, 'bratext-source.mp4');
     const finalVideo = path.join(dir, 'reel.mp4');
     const finalFrame = path.join(dir, 'final-frame.png');
-    const poster = path.join(dir, 'poster.png');
+    const poster = path.join(dir, 'poster.jpg');
 
     const generated = await bratVid(text, {
       outputFormat: 'mp4',
@@ -212,19 +212,21 @@ async function main() {
     if (c.mode === 'box') {
       const P = Math.max(Math.abs(c.ox), Math.abs(c.oy), 0);
       const hex = c.colour.map((v) => v.toString(16).padStart(2, '0')).join('');
-      const vf = `scale=${W}:${H}:flags=lanczos,crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${W + 2 * P}:${H + 2 * P}:${P + c.ox}:${P + c.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},format=rgb24`;
-      await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', vf, '-frames:v', '1', poster]);
+      const vf = `scale=${W}:${H}:flags=lanczos,crop=${c.w}:${c.h}:${c.x}:${c.y},pad=${W + 2 * P}:${H + 2 * P}:${P + c.ox}:${P + c.oy}:color=0x${hex},crop=${W}:${H}:${P}:${P},format=yuvj420p`;
+      await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-vf', vf, '-frames:v', '1', '-q:v', '2', poster]);
     } else {
-      await copyFile(finalFrame, poster);
+      // Even when centering detection cannot identify the BRAT box, transcode the PNG
+      // frame to a real JPEG. Renaming/copying a PNG to .jpg is not sufficient.
+      await run(['-y', '-hide_banner', '-loglevel', 'error', '-i', finalFrame, '-frames:v', '1', '-q:v', '2', '-pix_fmt', 'yuvj420p', poster]);
     }
 
     const videoBytes = await readFile(finalVideo);
     const posterBytes = await readFile(poster);
     const base = `${OWNER_ID}/reels/${MEME_ID}`;
     const videoPath = `${base}.mp4`;
-    const posterPath = `${base}-poster.png`;
+    const posterPath = `${base}-poster.jpg`;
     const videoUrl = await upload(videoPath, videoBytes, 'video/mp4');
-    const posterUrl = await upload(posterPath, posterBytes, 'image/png');
+    const posterUrl = await upload(posterPath, posterBytes, 'image/jpeg');
 
     await patchMeme({
       reel_asset_path: videoPath,

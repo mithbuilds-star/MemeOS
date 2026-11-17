@@ -1,7 +1,7 @@
 // Pure job-lifecycle rules shared by the Worker and its tests.
 // Lifecycle: queued -> processing -> completed
 //            queued -> processing -> retry_wait -> queued
-//            queued -> processing -> failed
+//            queued -> processing -> discarded
 // A job is only reclaimable when no live lease holds it. Ownership is a token
 // written on claim; every later write must match it (compare-and-set).
 
@@ -67,8 +67,8 @@ export function failureOutcome(row, message, nowMs, cfg = DEFAULTS) {
     processing_token: null,
   };
   if (attempt >= cfg.maxAttempts) {
-    // Terminal: out of active processing, but the record and media are kept.
-    return { ...base, processing_status: "failed", processing_next_retry_at: null, processing_failed_at: new Date(nowMs).toISOString(), _terminal: true, _attempt: attempt };
+    // Terminal: automatically discarded from processing after the configured attempts; original record/media remain.
+    return { ...base, processing_status: "discarded", processing_next_retry_at: null, processing_failed_at: new Date(nowMs).toISOString(), _terminal: true, _attempt: attempt };
   }
   // Non-terminal: the status is deliberately not written. A step may already have advanced
   // it in the database, and writing a stale value would regress the job.

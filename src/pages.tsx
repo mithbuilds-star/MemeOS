@@ -65,6 +65,65 @@ export function Accounts() {
   </>;
 }
 
+
+export function InstagramDashboard() {
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const load = () => api("/accounts").then((r) => setAccounts(r.accounts || [])).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+
+  const connect = async (id: string) => {
+    setBusy(id); setError(""); setMessage("");
+    try {
+      const r = await api(`/accounts/${id}/meta-connect`, { method: "POST", body: "{}" });
+      window.location.href = r.authorization_url;
+    } catch (e: any) {
+      setError(e.message || "Could not start Instagram connection.");
+      setBusy("");
+    }
+  };
+
+  const connected = accounts.filter((a) => a.connection_status === "connected");
+  const needsConnection = accounts.filter((a) => a.connection_status !== "connected");
+  const expiryLabel = (value?: string) => {
+    if (!value) return "Expiry not available";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "Expiry unavailable";
+    return `Token expires ${date.toLocaleDateString()} · ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  };
+
+  return <>
+    <PageHead eyebrow="META PLATFORM" title="Instagram" desc="Manage Instagram connections and check the status of your Meta publishing integration." action={<button className="btn secondary" onClick={load}><RefreshCw size={14}/> Refresh</button>}/>
+    {error && <Notice kind="error">{error}</Notice>}
+    {message && <Notice kind="success">{message}</Notice>}
+    <div className="stats-grid">
+      <Stat label="Connected accounts" value={connected.length} note="Instagram professional accounts linked" icon={Instagram}/>
+      <Stat label="Needs connection" value={needsConnection.length} note="Destination accounts not linked to Meta" icon={Activity}/>
+      <Stat label="Photo / Reel publishing" value="Enabled" note="Requires a valid token and approved permissions" icon={CheckCircle2}/>
+    </div>
+    <div className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><div><h3>Connected Instagram accounts</h3><p>OAuth tokens are stored encrypted on the Worker side and are never displayed here.</p></div><span className="tag">{connected.length} CONNECTED</span></div>
+      {accounts.length === 0 ? <Empty title="No destination accounts" text="Add an Instagram destination account first, then connect it to Meta from this page."/> :
+        <div className="table-wrap"><table><thead><tr><th>ACCOUNT</th><th>CONNECTION</th><th>TOKEN</th><th>STATUS</th><th></th></tr></thead><tbody>
+          {accounts.map((a) => <tr key={a.id}>
+            <td><b>@{a.username}</b><small>{a.display_name || "Instagram professional account"}</small></td>
+            <td><span className={`state ${a.connection_status === "connected" ? "ok" : "pending"}`}><i/>{a.connection_status || "Not connected"}</span></td>
+            <td><small>{expiryLabel(a.meta_token_expires_at)}</small>{a.meta_token_refreshed_at && <small>Last refreshed {new Date(a.meta_token_refreshed_at).toLocaleString()}</small>}</td>
+            <td>{a.meta_token_refresh_error ? <small className="error-text">{a.meta_token_refresh_error}</small> : <small>{a.connection_status === "connected" ? "No token errors reported" : "Connect to authorize publishing"}</small>}</td>
+            <td><button className="btn small secondary" onClick={() => connect(a.id)} disabled={!!busy}>{busy === a.id ? <Loader2 size={13} className="spin"/> : <Instagram size={13}/>} {a.connection_status === "connected" ? "Reconnect" : "Connect"}</button></td>
+          </tr>)}
+        </tbody></table></div>}
+    </div>
+    <div className="section-grid" style={{marginTop:18}}>
+      <div className="panel"><div className="panel-head"><div><h3>Publishing</h3><p>Instagram photo and Reel publishing.</p></div><span className="state ok"><i/>Implemented</span></div><p className="muted">Approved scheduled assignments are published by the background Worker. Photo assets are generated as JPEG; Reels use the rendered MP4.</p></div>
+      <div className="panel"><div className="panel-head"><div><h3>Comments, messages and webhooks</h3><p>Additional Instagram platform features.</p></div><span className="state pending"><i/>Not implemented</span></div><p className="muted">These features need separate API routes, webhook verification and event storage. They are not enabled by this build, and no controls are shown that would imply they work.</p></div>
+    </div>
+  </>;
+}
+
 export function Discovery() {
   const [sources,setSources]=useState<any[]>([]);const [accounts,setAccounts]=useState<any[]>([]);const [maps,setMaps]=useState<any[]>([]);const [username,setUsername]=useState("");const [busy,setBusy]=useState(false);const [message,setMessage]=useState("");const [jobs,setJobs]=useState<any[]>([]);const [mapAccount,setMapAccount]=useState("");const [mapSource,setMapSource]=useState("");
   const load=()=>Promise.all([api("/sources"),api("/discovery/jobs"),api("/accounts"),api("/destination-sources")]).then(([s,j,a,m])=>{setSources(s.sources||[]);setJobs(j.jobs||[]);setAccounts(a.accounts||[]);setMaps(m.items||[])}).catch(e=>setMessage(e.message));
@@ -120,8 +179,8 @@ export function Creator() {
   const [text,setText]=useState("");const [busy,setBusy]=useState(false);const [status,setStatus]=useState("");
   const draw=(canvas:HTMLCanvasElement|null)=>{if(!canvas)return;const ctx=canvas.getContext("2d");if(!ctx)return;canvas.width=1080;canvas.height=1080;ctx.fillStyle="#b7ff3c";ctx.fillRect(0,0,1080,1080);ctx.fillStyle="#111";ctx.textAlign="center";ctx.textBaseline="middle";ctx.font="700 48px Arial Narrow, Arial, sans-serif";const words=text.trim().split(/\s+/);const lines:string[]=[];let line="";for(const word of words){const test=line?`${line} ${word}`:word;if(ctx.measureText(test).width>900&&line){lines.push(line);line=word}else line=test;}if(line)lines.push(line);const lineHeight=60;const maxLines=Math.max(1,Math.floor(900/lineHeight));const visible=lines.slice(0,maxLines);visible.forEach((l,i)=>ctx.fillText(l,540,540-(visible.length-1)*lineHeight/2+i*lineHeight,900));};
   const canvasRef=(node:HTMLCanvasElement|null)=>draw(node);
-  const save=async()=>{if(!text.trim())return;setBusy(true);setStatus("");try{const r=await api("/memes/manual",{method:"POST",body:JSON.stringify({extracted_text:text})});setStatus(`Added to the library. Backend BRAT video rendering has been queued (${r.meme?.id||"created"}). The photo PNG will be extracted from the finished MP4.`)}catch(e:any){setStatus(e.message)}finally{setBusy(false)}};
-  return <><PageHead eyebrow="CREATION STUDIO" title="Meme Creator" desc="Create text and send it to the backend BRAT video renderer. The photo PNG comes from the final MP4 frame."/><div className="creator-layout"><div className="panel"><div className="panel-head"><div><h3>Canvas settings</h3><p>Text is preserved exactly as entered.</p></div><Settings2 size={17}/></div><label>Meme text<textarea rows={7} value={text} onChange={e=>setText(e.target.value)} maxLength={2000} placeholder="Type your meme text here..."/></label><button className="btn primary full" disabled={!text.trim()||busy} onClick={save}>{busy?<Loader2 className="spin" size={15}/>:<Download size={15}/>} Queue BRAT generation</button>{status&&<Notice kind="info">{status}</Notice>}</div><div className="panel preview-panel"><div className="panel-head"><div><h3>Live preview</h3><p>Approximate preview · final assets generated by the backend</p></div><span className="tag">BRAT STYLE</span></div><div className="canvas-wrap"><canvas id="brat-preview" ref={canvasRef}/></div></div></div></>;
+  const save=async()=>{if(!text.trim())return;setBusy(true);setStatus("");try{const r=await api("/memes/manual",{method:"POST",body:JSON.stringify({extracted_text:text})});setStatus(`Added to the library. Backend BRAT video rendering has been queued (${r.meme?.id||"created"}). The photo JPEG will be extracted from the finished MP4.`)}catch(e:any){setStatus(e.message)}finally{setBusy(false)}};
+  return <><PageHead eyebrow="CREATION STUDIO" title="Meme Creator" desc="Create text and send it to the backend BRAT video renderer. The photo JPEG comes from the final MP4 frame."/><div className="creator-layout"><div className="panel"><div className="panel-head"><div><h3>Canvas settings</h3><p>Text is preserved exactly as entered.</p></div><Settings2 size={17}/></div><label>Meme text<textarea rows={7} value={text} onChange={e=>setText(e.target.value)} maxLength={2000} placeholder="Type your meme text here..."/></label><button className="btn primary full" disabled={!text.trim()||busy} onClick={save}>{busy?<Loader2 className="spin" size={15}/>:<Download size={15}/>} Queue BRAT generation</button>{status&&<Notice kind="info">{status}</Notice>}</div><div className="panel preview-panel"><div className="panel-head"><div><h3>Live preview</h3><p>Approximate preview · final assets generated by the backend</p></div><span className="tag">BRAT STYLE</span></div><div className="canvas-wrap"><canvas id="brat-preview" ref={canvasRef}/></div></div></div></>;
 }
 
 export function Scheduler() {

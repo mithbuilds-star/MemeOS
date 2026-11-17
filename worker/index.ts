@@ -316,7 +316,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
       LOG("status_change",{meme_id:current.id,previous_status:"needs_ocr",new_status:"low_confidence",worker_id:token});
       return {status:"manual_review",reason:"No readable text"};
     }
-    const rows=await memeWrite(env,ctx,current.id,token,{extracted_text:extracted,ocr_confidence:null,processing_status:"ocr_complete",classification:"needs_review",classification_reason:"Server-side OCR completed. OCR confidence is not provided by the vision model; verify the transcription before approval.",processing_error:null,processing_attempts:0,processing_next_retry_at:null});
+    const rows=await memeWrite(env,ctx,current.id,token,{extracted_text:extracted,ocr_confidence:null,processing_status:"ocr_complete",classification:"needs_review",classification_reason:"Server-side OCR completed. OCR confidence is not provided by the vision model; verify the transcription before approval.",processing_error:null,processing_next_retry_at:null});
     LOG("status_change",{meme_id:current.id,previous_status:"needs_ocr",new_status:"ocr_complete",worker_id:token,database_update:"ok"});
     current=rows?.[0]||{...current,extracted_text:extracted,processing_status:"ocr_complete"};
   }
@@ -334,7 +334,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
     const classification=await withTimeout(classifyTextWithGroq(env,ctx,current.extracted_text),timeoutMs,"Classification request");
     LOG("classify_request",{meme_id:current.id,worker_id:token,duration_ms:Date.now()-started,provider:"groq"});
     const next=classification.suitable?"ready_for_asset":"rejected";
-    const rows=await memeWrite(env,ctx,current.id,token,{classification:classification.suitable?"suitable":"rejected",classification_reason:classification.reason,processing_status:next,processing_error:null,processing_attempts:0,processing_next_retry_at:null});
+    const rows=await memeWrite(env,ctx,current.id,token,{classification:classification.suitable?"suitable":"rejected",classification_reason:classification.reason,processing_status:next,processing_error:null,processing_next_retry_at:null});
     LOG("status_change",{meme_id:current.id,previous_status:"ocr_complete",new_status:next,worker_id:token});
     current=rows?.[0]||{...current,classification:classification.suitable?"suitable":"rejected",processing_status:next};
   }
@@ -369,7 +369,7 @@ async function runBackgroundProcessing(env:Env){
     if(stale&&meme.processing_token){
       const {_terminal,_attempt,...patch}=stale;
       const rows=await db(env,"memes",memeFilter(ctx,meme.id,meme.processing_token),{method:"PATCH",body:JSON.stringify({...patch,...(_terminal?{processing_failed_at:nowIso}:{})})});
-      LOG("stale_lease_recovered",{meme_id:meme.id,previous_status:meme.processing_status,new_status:_terminal?"failed":"retry_wait",worker_id:meme.processing_token,attempt:_attempt,lease_expires_at:meme.processing_locked_until,reason:"lease expired without renewal",database_update:rows?.length?"ok":"no_match"});
+      LOG("stale_lease_recovered",{meme_id:meme.id,previous_status:meme.processing_status,new_status:_terminal?"discarded":"retry_wait",worker_id:meme.processing_token,attempt:_attempt,lease_expires_at:meme.processing_locked_until,reason:"lease expired without renewal",database_update:rows?.length?"ok":"no_match"});
       continue;
     }
     if(!L.canClaim(meme,Date.now()))continue;
@@ -383,8 +383,8 @@ async function runBackgroundProcessing(env:Env){
     try{
       const result:any=await processMemeInBackground(env,row,token);
       if(result.status==="attempts_exhausted"){
-        await memeWrite(env,ctx,meme.id,token,{processing_status:"failed",processing_locked_until:null,processing_token:null,processing_next_retry_at:null,processing_failed_at:new Date().toISOString(),processing_error:`Failed after ${L.DEFAULTS.maxAttempts} attempts. The record and media are kept.`});
-        LOG("status_change",{meme_id:meme.id,previous_status:meme.processing_status,new_status:"failed",worker_id:token,attempt:Number(row.processing_attempts||0),reason:"max attempts exhausted"});
+        await memeWrite(env,ctx,meme.id,token,{processing_status:"discarded",processing_locked_until:null,processing_token:null,processing_next_retry_at:null,processing_failed_at:new Date().toISOString(),processing_error:`Automatically discarded after ${L.DEFAULTS.maxAttempts} failed attempts. The record and media are kept.`});
+        LOG("status_change",{meme_id:meme.id,previous_status:meme.processing_status,new_status:"discarded",worker_id:token,attempt:Number(row.processing_attempts||0),reason:"max attempts exhausted"});
       }else{
         LOG("attempt_end",{meme_id:meme.id,worker_id:token,result:result.status});
       }
@@ -396,7 +396,7 @@ async function runBackgroundProcessing(env:Env){
       let dbResult="ok";
       try{await memeWrite(env,ctx,meme.id,token,patch);}
       catch(writeErr:any){dbResult=writeErr instanceof LostOwnership?"lost_ownership":String(writeErr?.message||writeErr).slice(0,200);}
-      LOG("attempt_failed",{meme_id:meme.id,previous_status:meme.processing_status,new_status:_terminal?"failed":"retry_wait",worker_id:token,attempt:_attempt,reason:String(e?.message||e).slice(0,200),database_update:dbResult});
+      LOG("attempt_failed",{meme_id:meme.id,previous_status:meme.processing_status,new_status:_terminal?"discarded":"retry_wait",worker_id:token,attempt:_attempt,reason:String(e?.message||e).slice(0,200),database_update:dbResult});
     }
   }
 }
@@ -409,33 +409,33 @@ async function runWaitingReels(env:Env){
     const ctx:Ctx={userId:m.owner_id,token:""};
     const msg="The GitHub render did not report back within 30 minutes.";
     const {_terminal,_attempt,...patch}=L.failureOutcome(m,msg,Date.now());
-    const body:any={...patch,reel_status:"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:msg,...(_terminal?{processing_status:"failed",processing_failed_at:nowIso}:{})};
+    const body:any={...patch,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:msg,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})};
     const rows=await db(env,"memes",`?id=eq.${encodeURIComponent(m.id)}&${userFilter(ctx)}&reel_status=eq.rendering`,{method:"PATCH",body:JSON.stringify(body)});
-    LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"failed":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
+    LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
   const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
-  const auto=await db(env,"memes",`?reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
-  const manual=await db(env,"memes",`?reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
+  const auto=await db(env,"memes",`?processing_status=neq.discarded&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
+  const manual=await db(env,"memes",`?processing_status=neq.discarded&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
   const pending=[...auto,...manual].slice(0,10);
   for(const meme of pending){
     const ctx:Ctx={userId:meme.owner_id,token:""};
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
     if(settings[0]?.global_paused||settings[0]?.auto_process_enabled===false)continue;
     const leaseToken=crypto.randomUUID();
-    const lease=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&reel_status=eq.${meme.reel_status}&or=(reel_render_locked_until.is.null,reel_render_locked_until.lte.${encodeURIComponent(nowIso)})`,{method:"PATCH",body:JSON.stringify({reel_render_locked_until:new Date(Date.now()+L.leaseMs()).toISOString(),processing_token:leaseToken})});
+    const lease=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&processing_status=neq.discarded&reel_status=eq.${meme.reel_status}&or=(reel_render_locked_until.is.null,reel_render_locked_until.lte.${encodeURIComponent(nowIso)})`,{method:"PATCH",body:JSON.stringify({reel_render_locked_until:new Date(Date.now()+L.leaseMs()).toISOString(),processing_token:leaseToken})});
     if(!lease?.length)continue;
     try{
       const result:any=await renderReelForMeme(env,meme,leaseToken);
       const patch:any={reel_render_locked_until:null};
-      if(result.status==="attempts_exhausted"){patch.processing_status="failed";patch.processing_failed_at=nowIso;patch.processing_token=null;}
+      if(result.status==="attempts_exhausted"){patch.processing_status="discarded";patch.reel_status="discarded";patch.processing_failed_at=nowIso;patch.processing_token=null;patch.processing_error=`Automatically discarded after ${L.DEFAULTS.maxAttempts} failed attempts. The record and media are kept.`;}
       else if(result.status==="renderer_not_configured"){patch.processing_token=null;}
       await memeWrite(env,ctx,meme.id,leaseToken,patch);
     }catch(e:any){
       if(e instanceof LostOwnership){LOG("lost_ownership_discarded",{meme_id:meme.id,reason:e.message});continue;}
       const out=L.failureOutcome(meme,e?.message||e,Date.now());
       const {_terminal,_attempt,...p}=out;
-      await memeWrite(env,ctx,meme.id,leaseToken,{...p,reel_status:"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,...(_terminal?{processing_status:"failed",processing_failed_at:nowIso}:{})}).catch(()=>{});
-      LOG("render_dispatch_failed",{meme_id:meme.id,attempt:_attempt,new_status:_terminal?"failed":"retry_wait",reason:String(e?.message||e).slice(0,200)});
+      await memeWrite(env,ctx,meme.id,leaseToken,{...p,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:null,reel_render_locked_until:null,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})}).catch(()=>{});
+      LOG("render_dispatch_failed",{meme_id:meme.id,attempt:_attempt,new_status:_terminal?"discarded":"retry_wait",reason:String(e?.message||e).slice(0,200)});
     }
   }
 }
@@ -615,7 +615,7 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     const isReel = meme.output_format === "reel";
     const mediaUrl = isReel ? meme.reel_asset_url : meme.asset_url;
     if (!mediaUrl) throw new Error(isReel ? "The Reel file is missing. Reprocess this meme." : "The photo file is missing. Reprocess this meme.");
-    if (!isReel && /\.png(\?|$)/i.test(mediaUrl)) throw new Error("Instagram photo posts need a JPEG file, and this BRAT photo is PNG. Photo publishing needs a JPEG render first.");
+    if (!isReel && !/\.jpe?g(?:\?|$)/i.test(mediaUrl)) throw new Error("Instagram photo publishing requires a JPEG asset. Reprocess this meme to generate the new JPEG photo output.");
 
     const token = await decryptSecret(env, { encrypted_secret: account.meta_access_token_enc, encryption_iv: account.meta_access_token_iv });
     const version = env.META_GRAPH_VERSION || "v27.0";
@@ -671,7 +671,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     ]);
     return json({ accounts:a.length, memes:m.length, pending:q.length, published:pub.length, scheduled:sched.length });
   }
-  if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=*&order=created_at.desc`) });
+  if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,owner_id,instagram_account_id,username,display_name,account_type,connection_status,token_expires_at,discovery_enabled,created_at,updated_at,meta_user_id,meta_token_expires_at,meta_token_refreshed_at,meta_token_refresh_error,profile_picture_url&order=created_at.desc`) });
   if (p === "/accounts" && method === "POST") {
     const username = String(body.username || "").trim().replace(/^@/,"").toLowerCase();
     if (!/^[a-z0-9._]{1,30}$/.test(username)) return fail("Enter a valid Instagram username.");
@@ -841,8 +841,9 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       if (r.reel_status) reel[r.reel_status] = (reel[r.reel_status] || 0) + 1;
     }
     const items = rows.filter((r) =>
-      !["generated", "rejected", "media_unavailable"].includes(r.processing_status || "") ||
-      ["render_failed", "renderer_not_configured"].includes(r.reel_status || "")
+      r.processing_status !== "discarded" &&
+      (!["generated", "rejected", "media_unavailable"].includes(r.processing_status || "") ||
+        ["render_failed", "renderer_not_configured"].includes(r.reel_status || ""))
     ).slice(0, 200);
     const nowMs = Date.now();
     const total = rows.length;
@@ -886,7 +887,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const rows=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=id,processing_status`);
     if(!rows.length)return fail("Meme not found.",404);
     if(rows[0].processing_status==="generated")return fail("Generated items are not stuck; they can be rejected from the approval queue instead.",409);
-    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&processing_status=neq.generated`,{method:"PATCH",body:JSON.stringify({processing_status:"rejected",classification:"rejected",classification_reason:"Discarded by user from Not Finished.",processing_locked_until:null,processing_next_retry_at:null})});
+    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&processing_status=neq.generated`,{method:"PATCH",body:JSON.stringify({processing_status:"discarded",reel_status:"discarded",classification_reason:"Discarded by user from Not Finished.",processing_locked_until:null,processing_token:null,processing_next_retry_at:null,reel_render_locked_until:null,reel_render_next_retry_at:null})});
     if(!updated?.length)return fail("Could not discard this item. It may have just finished.",409);
     return json({meme:updated[0]});
   }
@@ -904,7 +905,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{ method: "PATCH", body: JSON.stringify({ ...reset, processing_status: g.status }) });
       requeued += rows.length;
     }
-    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: new Date().toISOString(), processing_error: null }) });
+    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=neq.discarded&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: new Date().toISOString(), processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
   }
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}

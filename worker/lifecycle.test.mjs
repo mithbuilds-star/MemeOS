@@ -73,14 +73,33 @@ test("OCR returns after a retry has started: the late write is rejected", async 
   assert.equal(store.get("m1").extracted_text, undefined);
 });
 
-test("maximum attempts exhausted: job becomes failed, out of active processing, record kept", () => {
+test("maximum attempts exhausted: job becomes discarded, out of active processing, record kept", () => {
   const row = base({ processing_attempts: 2, processing_token: "A", classification: "suitable", extracted_text: "HELLO" });
   const out = L.failureOutcome(row, "render crashed", T0);
   assert.equal(out._terminal, true);
-  assert.equal(out.processing_status, "failed");
+  assert.equal(out.processing_status, "discarded");
   assert.equal(out.processing_next_retry_at, null);
   assert.equal(out.processing_token, null);
   assert.equal(L.isActive({ ...row, ...out }), false);
+});
+
+test("three cumulative failed attempts automatically discard the item", () => {
+  let row = base();
+  const first = L.failureOutcome(row, "OCR timeout", T0);
+  row = { ...row, ...first };
+  assert.equal(first.processing_attempts, 1);
+  assert.equal(first._terminal, false);
+
+  const second = L.failureOutcome(row, "Classification timeout", T0 + 120_000);
+  row = { ...row, ...second };
+  assert.equal(second.processing_attempts, 2);
+  assert.equal(second._terminal, false);
+
+  const third = L.failureOutcome(row, "Render failed", T0 + 360_000);
+  assert.equal(third.processing_attempts, 3);
+  assert.equal(third._terminal, true);
+  assert.equal(third.processing_status, "discarded");
+  assert.equal(third.processing_next_retry_at, null);
 });
 
 test("a render dispatch is not reclaimed until the watchdog, and counts as an attempt", () => {

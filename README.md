@@ -15,17 +15,17 @@ This is a deployable source-code build, not a pre-connected hosted service. Exte
 - In-app API Manager for multiple Apify and Groq keys, encrypted with AES-GCM; keys are never returned to the browser.
 - Apify run initiation with enabled-key fallback, configurable per-key actor JSON input, dynamic source-user placeholders, run polling, dataset retrieval, flexible output normalization, duplicate detection, image download to Supabase Storage, and job history.
 - Destination accounts, reference sources, account-specific source mappings, independent discovery toggles, multiple parent relationships, cycle prevention, and inheritance propagation for newly discovered items.
-- Unattended backend OCR through Cloudflare Workers AI, Groq text-only classification using the in-app multi-key manager, and server-side BRAT MP4 rendering with the generated final frame extracted as the photo PNG. The scheduled Worker runs every minute; closing the dashboard does not stop processing.
+- Unattended backend OCR through Cloudflare Workers AI, Groq text-only classification using the in-app multi-key manager, and server-side BRAT MP4 rendering with the generated final frame converted to a JPEG photo. The scheduled Worker runs every minute; closing the dashboard does not stop processing.
 - Central meme library, approval actions, per-account assignment API, recurring discovery (configurable from 15 minutes to 24 hours), scheduling CRUD, and persistent every-minute Worker cron execution.
-- Meta Facebook Login OAuth callback, encrypted Page-token storage, destination connection status, and scheduled native-photo publishing through the Graph API.
+- Meta Instagram Login OAuth callback, encrypted Instagram-token storage, destination connection status, and scheduled native-photo publishing through the Graph API.
 - Publishing history, Meta media metrics synchronization where the connected account/API returns them, analytics sync button and periodic sync, health view, global pause, automatic queue processing controls, publishing leases, bounded retries and ambiguous-publish protection.
 
 ### Not yet verified / known boundaries
 - The Apify actor is user-selected. Its dataset output must contain recognizable post ID, image URL, username, and/or caption fields. Per-key JSON input supports the selected actor schema and source placeholders. Actor-specific schemas may require an adapter.
 - Background OCR uses Cloudflare Workers AI (Gemma 4 vision) and runs in the scheduled Worker. The image transcription has no calibrated confidence score, so it is explicitly marked as unscored and should be checked in the approval queue. Images with no readable text are held for manual review. Groq classification and the BRAT video/final-frame pipeline also run server-side. The dashboard does not need to remain open. Processing retries are bounded and persisted in the database.
 - Groq classification uses a configured model identifier; model availability can change. Failed/low-confidence candidates remain reviewable.
-- Meta OAuth and publishing code are implemented but cannot be claimed live-working until a Meta app is configured, permissions are granted, and a real professional Instagram account is connected and tested. Meta requires eligible professional accounts and supported permissions. No post is published without an approved scheduled assignment.
-- Reel output is prepared by the separate Node/FFmpeg render service in `render-service/`, using the `brat-canvas` progressive BRAT video renderer. The 0–5 second end-frame hold defaults to 2 seconds and is added after the renderer output. Uploaded song-library tracks are selected randomly with least-used bias and mixed into the MP4. The PNG is extracted from the literal final frame of that finished MP4. Actual Meta Reel publishing still requires live integration verification and an eligible connected professional account.
+- Meta OAuth, token refresh and scheduled publishing code are implemented. The Instagram dashboard now shows account connection and token status. These flows cannot be claimed live-working until a Meta app is configured, permissions are granted, and a real professional Instagram account is connected and tested. Comments, messaging and inbound webhooks are not implemented in this build. Meta requires eligible professional accounts and supported permissions. No post is published without an approved scheduled assignment.
+- Reel output is prepared by the separate Node/FFmpeg renderer in `render/`, using the `brat-canvas` progressive BRAT video renderer. The 0–5 second end-frame hold defaults to 2 seconds and is added after the renderer output. Uploaded song-library tracks are selected randomly with least-used bias and mixed into the MP4. The final frame is extracted from the rendered MP4 and transcoded to a real JPEG (`image/jpeg`) for Instagram photo publishing. Actual Meta Reel publishing still requires live integration verification and an eligible connected professional account.
 - Meta insights availability varies by media type, account eligibility, permissions and API version. MemeOS records only numeric fields returned by Meta and leaves missing metrics unavailable.
 - A full dependency-backed production build and live provider test could not be completed in this environment because npm dependency installation timed out. Static source parsing and Node syntax checks are performed for this source archive, but they are not a substitute for a full dependency-backed build or deployed integration test.
 
@@ -38,9 +38,15 @@ Run all migrations in order in Supabase SQL Editor:
 5. `supabase/migrations/0005_server_side_automation.sql`
 6. `supabase/migrations/0006_video_song_library.sql`
 7. `supabase/migrations/0007_v1_completion.sql`
+8. `supabase/migrations/0008_meme_output_format.sql`
+9. `supabase/migrations/0009_reference_scrape_offset.sql`
+10. `supabase/migrations/0010_processing_ownership.sql`
+11. `supabase/migrations/0011_text_fingerprints_and_format.sql`
+12. `supabase/migrations/0012_instagram_login_tokens.sql`
+13. `supabase/migrations/0013_auto_discard_after_three_attempts.sql`
 
 ## Cloudflare runtime
-The Worker serves the built React app and `/api/*` endpoints. It uses Supabase for authentication, database and storage. Provider keys are entered inside MemeOS Settings → API Manager; do not put individual Apify or Groq keys in Worker environment settings. The `AI` Workers AI binding provides server-side OCR. A five-minute Cron Trigger runs discovery polling, unattended OCR/classification/asset generation, and approved scheduled publishing. The separate `render-service/` Node container performs FFmpeg MP4 rendering because Cloudflare Workers are not a suitable place to run FFmpeg.
+The Worker serves the built React app and `/api/*` endpoints. It uses Supabase for authentication, database and storage. Provider keys are entered inside MemeOS Settings → API Manager; do not put individual Apify or Groq keys in Worker environment settings. The `AI` Workers AI binding provides server-side OCR. A five-minute Cron Trigger runs discovery polling, unattended OCR/classification/asset generation, and approved scheduled publishing. The separate `render/` Node renderer performs FFmpeg MP4 rendering because Cloudflare Workers are not a suitable place to run FFmpeg.
 
 ## Requirements
 
@@ -48,14 +54,14 @@ The Worker serves the built React app and `/api/*` endpoints. It uses Supabase f
 - A Supabase project
 - A Cloudflare account for deployment
 - Optional Apify, Groq and Meta developer credentials
-- Separate Node 20 render service with FFmpeg and `brat-canvas` for MP4 generation
+- Separate Node 20 renderer with FFmpeg and `brat-canvas` for MP4 generation
 - Cloudflare Workers AI enabled for server-side OCR
 
 ## Local setup
 
 1. Install dependencies: `npm install`.
 2. Create a Supabase project.
-3. In Supabase SQL Editor, run all seven migrations in order (see Database migrations above).
+3. In Supabase SQL Editor, run all thirteen migrations in order (see Database migrations above).
 4. Optionally copy `.env.example` to `.env.local`. For Cloudflare, the frontend reads Supabase public configuration from `/api/public-config` at runtime.
 5. Start the frontend with `npm run dev`.
 6. Create an account using the sign-up link on the login screen.
@@ -67,7 +73,10 @@ Set the following infrastructure secrets once:
 ```bash
 npx wrangler secret put SUPABASE_SECRET_KEY
 npx wrangler secret put CREDENTIALS_ENCRYPTION_KEY
+npx wrangler secret put META_APP_SECRET
 ```
+
+`META_APP_SECRET` is obtained from Meta for Developers → App settings → Basic → App Secret. Keep it as a Cloudflare Worker secret, never in `wrangler.toml`. Keep the existing `CREDENTIALS_ENCRYPTION_KEY` unchanged; do not regenerate it if encrypted provider credentials already exist.
 
 `CREDENTIALS_ENCRYPTION_KEY` must be a base64-encoded 32-byte key. Generate one with:
 
@@ -77,7 +86,7 @@ openssl rand -base64 32
 
 Paste the generated value when Wrangler prompts for the secret. Keep it private and back it up securely: losing it makes previously stored provider keys impossible to decrypt. Do not rotate it without first migrating/re-encrypting stored keys.
 
-Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` as Cloudflare Worker runtime variables. Set `SUPABASE_SECRET_KEY` and `CREDENTIALS_ENCRYPTION_KEY` as Worker secrets. The Worker exposes only the URL and publishable key at `/api/public-config`; the secret key is never exposed. Then run:
+Set `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `META_APP_ID`, `META_GRAPH_VERSION`, and `META_REDIRECT_URI` as Cloudflare Worker runtime variables. `GITHUB_REPO` is also configured in `wrangler.toml`. Set `SUPABASE_SECRET_KEY` and `CREDENTIALS_ENCRYPTION_KEY` as Worker secrets. The Worker exposes only the URL and publishable key at `/api/public-config`; the secret key is never exposed. Then run:
 
 ```bash
 npm run build
@@ -164,7 +173,7 @@ All API routes require a valid Supabase access token. The Worker validates the u
 2. Connect the repository to Cloudflare Workers Builds or deploy with Wrangler.
 3. Set the two infrastructure secrets above.
 4. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` as Worker runtime variables; the frontend loads them from `/api/public-config`.
-5. Apply all seven Supabase migrations in order.
+5. Apply all thirteen Supabase migrations in order.
 6. Deploy. Then sign in and add provider keys in Settings → API Manager.
 
 ## Security notes
@@ -182,7 +191,7 @@ All API routes require a valid Supabase access token. The Worker validates the u
 - The Cloudflare Worker Cron Trigger runs every minute. OCR, Groq classification and BRAT MP4/final-frame rendering run on the backend; the dashboard does not need to be open and the user does not need to stay signed in.
 - OCR uses Cloudflare Workers AI Gemma 4 vision. The model does not provide a calibrated OCR confidence score in this workflow, so MemeOS does not invent one; extracted text is explicitly marked as unscored for human verification.
 - Candidates with no readable text are held for manual review. Groq only classifies text already extracted from the image and never rewrites the joke.
-- Processing locks, attempts, errors and retry times are persisted. Retries are bounded to five attempts with exponential backoff. A failed item can be requeued from the Approval Queue.
+- Processing locks, attempts, errors and retry times are persisted. Retries are bounded to three total processing attempts with exponential backoff. After the third failed attempt, the item is marked `discarded`; its record and original media are retained. A failed item can be requeued from the Approval Queue.
 - Global pause stops background processing. Disabling automatic content processing pauses OCR/classification/generation while preserving pending items.
 - The system does not auto-approve or publish discovered memes. A person must approve each destination assignment before scheduling.
 
@@ -198,7 +207,7 @@ All API routes require a valid Supabase access token. The Worker validates the u
 - Apply migrations `0006_video_song_library.sql` and `0007_v1_completion.sql` after migrations 0001–0005.
 - In the app, open **Song Library** and upload audio files you have rights to use. Files are private per user and capped at 30 MB each.
 - Settings includes **Reel final-frame freeze**, from 0 to 5 seconds in 0.5-second increments, default 2 seconds. It also includes the recurring discovery interval. The renderer adds this hold after the progressive word reveal and keeps the final frame unchanged.
-- The renderer calls `bratVid` from `brat-canvas/video` to create a progressive word-reveal MP4, then FFmpeg adds the configured 0–5 second final-frame hold and mixes one enabled library track. The photo PNG is derived from the finished MP4 final frame, fitted into a 4:5 canvas with the same green background (no text content is cropped) for feed-photo compatibility; Reels use the full 9:16 MP4.
+- The renderer calls `bratVid` from `brat-canvas/video` to create a progressive word-reveal MP4, then FFmpeg adds the configured 0–5 second final-frame hold and mixes one enabled library track. The photo JPEG is derived from the finished MP4 final frame, kept as a 1080×1080 square photo with the same green background (no text content is cropped) for feed-photo compatibility, then transcoded to JPEG; Reels use the full 9:16 MP4.
 - `render-service/` is a separate Node 20 + FFmpeg service using `brat-canvas`. Build it from its Dockerfile and protect `/render` with a shared token. Set the renderer service `SUPABASE_URL` so it only accepts signed audio URLs from the configured private song bucket. The Cloudflare Worker must be configured with the renderer URL/token before background Reel rendering can run.
 - Renderer clarification: the linked `tanbaycu/BraText` repository documents image export, not an MP4 API. To meet the MP4 workflow, this build uses the MIT-licensed `brat-canvas` video module for progressive BRAT text rendering and FFmpeg for the final-frame hold/audio mux. This is not a direct MP4 call to the `tanbaycu/BraText` repository.
 - Only upload audio you own or are licensed to use.
@@ -206,7 +215,7 @@ All API routes require a valid Supabase access token. The Worker validates the u
 ### Render service local check
 
 ```bash
-cd render-service
+cd render
 npm install
 RENDER_SERVICE_TOKEN=local-test npm start
 ```

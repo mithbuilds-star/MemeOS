@@ -1,16 +1,16 @@
 import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import {
-  Activity, BarChart3, CalendarDays, CheckCheck, ChevronDown, CircleHelp,
+  Activity, BarChart3, CalendarDays, CheckCheck, ChevronDown, CircleHelp, Instagram,
   Clapperboard, Command, Compass, Database, FileImage, LayoutDashboard,
   LogOut, Menu, Moon, Plus, Search, Settings, ShieldCheck, Sun, Users,
   Workflow, X
 } from "lucide-react";
 import { initializeSupabase, supabase } from "./lib/supabase";
-import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline } from "./pages";
+import { Overview, Accounts, InstagramDashboard, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline } from "./pages";
 
 const nav = [
-  ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users],
+  ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users], ["Instagram", "/instagram", Instagram],
   ["Discovery", "/discovery", Compass], ["Approval Queue", "/queue", CheckCheck],
   ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage], ["Meme Creator", "/creator", Clapperboard],
   ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow],
@@ -96,7 +96,7 @@ export default function App() {
         </div>
       </header>
       <div className="page-wrap"><Routes>
-        <Route path="/" element={<Overview/>}/><Route path="/accounts" element={<Accounts/>}/>
+        <Route path="/" element={<Overview/>}/><Route path="/accounts" element={<Accounts/>}/><Route path="/instagram" element={<InstagramDashboard/>}/>
         <Route path="/discovery" element={<Discovery/>}/><Route path="/queue" element={<Queue/>}/>
         <Route path="/library" element={<Library/>}/><Route path="/songs" element={<SongLibrary/>}/><Route path="/creator" element={<Creator/>}/>
         <Route path="/scheduler" element={<Scheduler/>}/><Route path="/publishing" element={<Publishing/>}/>

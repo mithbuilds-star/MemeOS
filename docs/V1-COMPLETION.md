@@ -10,7 +10,7 @@ This archive is the V1.5 source-complete candidate. It contains the V1 product w
 - Per-key Apify Actor ID and JSON input, including `{{usernames}}`, `{{profile_urls}}`, and `{{start_urls}}` placeholders.
 - Recurring discovery and persistent Apify run polling through the every-minute Worker Cron Trigger.
 - Server-side Workers AI OCR, Groq text-only suitability classification, editable extracted text and manual-review handling.
-- BRAT progressive MP4 generation through `brat-canvas/video`; the final-frame photo PNG is derived from the completed MP4 and fitted into a 4:5 canvas without cropping the text content.
+- BRAT progressive MP4 generation through `brat-canvas/video`; the final-frame photo JPEG is derived from the completed MP4 and retained as a 1080×1080 square image without cropping the text content.
 - Song library upload, preview, enable/disable/delete, least-used-biased random selection and audio mixing into Reels.
 - 0–5 second final-frame freeze setting (default 2 seconds).
 - Per-account approval, approval reset after text edits, scheduling, Meta OAuth, photo publishing, Reel publishing, publishing history and Meta media analytics sync where available.
@@ -18,16 +18,17 @@ This archive is the V1.5 source-complete candidate. It contains the V1 product w
 
 ## Verification performed in this build environment
 
-- TypeScript/TSX source parsing: passed.
-- Render service JavaScript syntax check: passed.
-- JSON and Wrangler TOML parsing: passed.
-- FFmpeg smoke test for final-frame hold and 4:5 poster fitting: passed (1080×1920 Reel, 1080×1350 photo asset).
-- ZIP integrity: checked after packaging.
+- Node lifecycle tests: passed (12 tests).
+- Worker TypeScript syntax check using Node's type-stripping parser: passed.
+- Render JavaScript syntax check: passed.
+- Wrangler TOML and package JSON parsing: passed.
+- FFmpeg smoke test: a generated 1080×1080 PNG was successfully transcoded to a valid JPEG.
+
 
 ## Not verified here
 
-- Full dependency-backed `npm run build`: npm registry DNS resolution failed (`EAI_AGAIN`), so dependencies could not be installed in this environment.
-- Actual `brat-canvas` package execution inside the render-service container.
+- Full dependency-backed `npm run build`: not completed in this run because `npm ci` timed out while fetching dependencies.
+- Actual `brat-canvas` package execution inside the `render/` GitHub Actions job.
 - Supabase migrations against a live project.
 - The exact Apify actor input/output contract selected by the user.
 - Live Meta OAuth, publishing and insights. These require the user's Meta app, eligible professional Instagram accounts and granted permissions.

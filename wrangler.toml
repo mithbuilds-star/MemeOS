@@ -12,6 +12,8 @@ not_found_handling = "single-page-application"
 APP_ENV = "production"
 SUPABASE_URL = "https://brlqdwnpoamvfuhdpdtx.supabase.co"
 META_GRAPH_VERSION = "v27.0"
+META_APP_ID = "1853871738958660"
+META_REDIRECT_URI = "https://memeos.mithbuilds.workers.dev/api/meta/callback"
 GITHUB_REPO = "mithbuilds-star/MemeOS"
 
 [triggers]

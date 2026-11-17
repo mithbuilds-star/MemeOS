@@ -21,7 +21,7 @@
 
 ## V1.4 — Reels and song library
 - `brat-canvas/video` creates progressive BRAT text-reveal MP4s; FFmpeg adds the user-configurable 0–5 second final-frame hold and selected audio track.
-- The photo PNG is extracted from the literal final frame of the finished MP4.
+- The final frame is extracted from the rendered MP4 and transcoded to a real JPEG for Instagram photo publishing.
 - Private per-user song library, random selection with least-used bias, and audio mixed into Reel MP4s.
 - Queue approval distinguishes photo posts from Reels; scheduled publishing uses the matching asset type.
 
