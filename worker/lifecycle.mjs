@@ -60,7 +60,7 @@ export function backoffMs(attempt, cfg = DEFAULTS) {
 // attempt = attempts already recorded + 1.
 export function failureOutcome(row, message, nowMs, cfg = DEFAULTS) {
   const attempt = Number(row.processing_attempts || 0) + (row.reel_status === "rendering" ? 0 : 1);
-  const error = String(message || "Unknown error").trim().replace(/\\s+/g, " ").slice(0, 500);
+  const error = String(message || "Unknown error").trim().replace(/\s+/g, " ").slice(0, 500);
   const key = error.toLowerCase();
   const consecutive = Number(row.processing_consecutive_errors || 0) + 1;
   const same = key && key === String(row.processing_last_error_key || "") 
