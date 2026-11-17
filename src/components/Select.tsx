@@ -3,22 +3,35 @@ import { Check, ChevronDown, Search } from "lucide-react";
 
 export type SelectOption = { value: string; label: string };
 
-export function Select({ value, onChange, options, placeholder = "Select", disabled = false }: {
+export function Select({ value, onChange, options, placeholder = "Select", disabled = false, defaultValue, defaultLabel }: {
   value: string;
   onChange: (value: string) => void;
   options: SelectOption[];
   placeholder?: string;
   disabled?: boolean;
+  defaultValue?: string;
+  defaultLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const listId = useId();
-  const selected = options.find((o) => o.value === value);
+  const displayOptions = useMemo(() => {
+    if (defaultValue === undefined) return options;
+    const existing = options.find((o) => o.value === defaultValue);
+    const fallback: SelectOption = {
+      value: defaultValue,
+      label: defaultLabel || (defaultValue === "" ? placeholder : `Default · ${existing?.label || placeholder}`),
+    };
+    return existing
+      ? options.map((o) => o.value === defaultValue ? fallback : o)
+      : [fallback, ...options];
+  }, [options, defaultValue, defaultLabel, placeholder]);
+  const selected = displayOptions.find((o) => o.value === value);
   const filtered = useMemo(
-    () => options.filter((o) => o.label.toLowerCase().includes(query.trim().toLowerCase())),
-    [options, query]
+    () => displayOptions.filter((o) => o.label.toLowerCase().includes(query.trim().toLowerCase())),
+    [displayOptions, query]
   );
 
   useEffect(() => {
