@@ -707,7 +707,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const rows = await db(env,"instagram_accounts","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,username,connection_status:"not_connected",discovery_enabled:true})});
     return json({ account:rows?.[0] },201);
   }
-  const metaConnect=p.match(/^\\/accounts\\/([0-9a-f-]+)\\/meta-connect$/);
+  const metaConnect=p.match(/^\/accounts\/([0-9a-f-]+)\/meta-connect$/);
   if(metaConnect&&method==="POST"){
     if(!env.META_APP_ID||!env.META_APP_SECRET)return fail("Set META_APP_ID and META_APP_SECRET in the Cloudflare Worker first.",503);
     if(!await owned(env,"instagram_accounts",metaConnect[1],ctx))return fail("Account not found.",404);
