@@ -621,7 +621,7 @@ async function runScheduledDiscovery(env:Env){
     if(settings.last_usage_refresh_date!==indiaDate){
       await refreshAllCredentialUsage(env,ctx);
       if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_usage_refresh_date:indiaDate})});
-      else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,last_usage_refresh_date:indiaDate})});
+      else {await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,last_usage_refresh_date:indiaDate})});settingsRows.push({last_usage_refresh_date:indiaDate});}
     }
     if(settings.global_paused)continue;
     const interval=Math.max(15,Number(settings.discovery_interval_minutes||60));
