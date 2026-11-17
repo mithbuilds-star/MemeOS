@@ -237,6 +237,10 @@ async function main() {
       asset_url: posterUrl,
       processing_status: 'generated',
       processing_error: null,
+      processing_consecutive_errors: 0,
+      processing_same_error_count: 0,
+      processing_last_error_key: null,
+      processing_next_retry_at: null,
       processing_locked_until: null,
       reel_render_locked_until: null,
       reel_render_next_retry_at: null,
@@ -252,11 +256,24 @@ main().catch(async (e) => {
   console.error(e);
   try {
     if (env.SUPABASE_URL && env.SUPABASE_SECRET_KEY && env.MEME_ID && env.OWNER_ID) {
+      const error = String(e?.message || e || 'Unknown render error').trim().replace(/\\s+/g, ' ').slice(0, 500);
+      const key = error.toLowerCase();
+      const consecutive = Number((await fetch(`${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}&select=processing_consecutive_errors,processing_same_error_count,processing_last_error_key`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }).then(r => r.json()).then(rows => rows?.[0]))?.processing_consecutive_errors || 0) + 1;
+      const prior = await fetch(`${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}&select=processing_same_error_count,processing_last_error_key`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }).then(r => r.json()).then(rows => rows?.[0] || {});
+      const same = prior.processing_last_error_key === key ? Number(prior.processing_same_error_count || 0) + 1 : 1;
+      const terminal = same >= 3 || consecutive >= 5;
+      const retryAt = new Date(Date.now() + Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, consecutive - 1)))).toISOString();
       await patchMeme({
-        reel_status: 'render_failed',
-        processing_error: String(e?.message || e).slice(0, 500),
+        reel_status: terminal ? 'discarded' : 'render_failed',
+        processing_status: terminal ? 'discarded' : 'generated',
+        processing_error: error,
+        processing_consecutive_errors: consecutive,
+        processing_same_error_count: same,
+        processing_last_error_key: key,
+        processing_failed_at: terminal ? new Date().toISOString() : null,
+        processing_next_retry_at: terminal ? null : retryAt,
         reel_render_locked_until: null,
-        reel_render_next_retry_at: null, // no automatic retry: the user presses Retry
+        reel_render_next_retry_at: terminal ? null : retryAt,
         processing_locked_until: null,
         processing_token: null,
       });
