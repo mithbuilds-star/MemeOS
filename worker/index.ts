@@ -201,6 +201,30 @@ async function classifyTextWithGroq(env:Env,ctx:Ctx,text:string){
   throw new Error(lastError);
 }
 
+async function generateCaptionWithGroq(env:Env,ctx:Ctx,meme:any):Promise<string>{
+  const source=String(meme.extracted_text||meme.original_caption||"").trim();
+  if(!source)throw new Error("This meme has no readable text for AI caption generation.");
+  const creds=await db(env,"api_credentials","?"+userFilter(ctx)+"&provider=eq.groq&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte."+encodeURIComponent(new Date().toISOString())+")&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc");
+  if(!creds.length)throw new Error("No enabled Groq API key. Add one in Settings → API Manager to generate captions.");
+  let lastError="Groq could not generate a caption.";
+  for(const credential of creds){
+    try{
+      const secret=await decryptSecret(env,credential);
+      const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+secret,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0.8,response_format:{type:"json_object"},messages:[
+        {role:"system",content:"Write a tiny Instagram meme caption based on the meme text. Return JSON only: {\"caption\":\"...\"}. The caption MUST be one or two words only, lowercase, casual internet slang/reaction language (examples: real, relatable, fr, ong, literally me, too real). Do not use hashtags, emojis, sentences, explanations, quotes, or more than two words. Pick a natural reaction that fits the joke; do not merely repeat the meme text."},
+        {role:"user",content:"Meme text:\\n"+source.slice(0,3000)}
+      ]})});
+      const data:any=await response.json().catch(()=>({}));
+      if(!response.ok){lastError=data.error?.message||"Groq returned "+response.status+".";await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
+      const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}");
+      const caption=String(parsed.caption||"").trim().toLowerCase().replace(/^["\']+|["\']+$/g,"").replace(/[.!?,;:]+$/g,"").replace(/\\s+/g," ");
+      if(!/^[a-z0-9][a-z0-9'_-]*(?:\\s+[a-z0-9][a-z0-9'_-]*)?$/.test(caption))throw new Error("AI returned a caption that was not one or two words. Try approving again.");
+      await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+      return caption;
+    }catch(e:any){lastError=e.message||lastError;}
+  }
+  throw new Error(lastError);
+}
 async function extractTextWithWorkersAI(env:Env,imageBytes:ArrayBuffer,contentType:string){
   if(!env.AI)throw new Error("Cloudflare Workers AI binding is missing. Server-side OCR cannot run until the AI binding is enabled.");
   const bytes=new Uint8Array(imageBytes);
@@ -675,7 +699,7 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     db(env, "publishing_history", "", { method: "POST", body: JSON.stringify({ owner_id: item.owner_id, ...row }) }).catch(() => {});
   let assignmentRow: any = null;
   try {
-    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url),instagram_accounts(id,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at,meta_api_host,meta_token_type)`);
+    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url,social_caption),instagram_accounts(id,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at,meta_api_host,meta_token_type)`);
     assignmentRow = rows?.[0];
     if (!assignmentRow) throw new Error("Scheduled assignment no longer exists.");
     const account = assignmentRow.instagram_accounts;
@@ -700,6 +724,7 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     form.set("access_token", token);
     if (isReel) { form.set("media_type", "REELS"); form.set("video_url", mediaUrl); }
     else form.set("image_url", mediaUrl);
+    if (meme.social_caption) form.set("caption", String(meme.social_caption).slice(0, 80));
     const container = await graphRequest(version, `${userId}/media`, { method: "POST", body: form }, account.meta_api_host || "graph.instagram.com");
     const creationId = encodeURIComponent(container.id);
 
@@ -806,6 +831,14 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const destSourceMatch=p.match(/^\/destination-sources\/([0-9a-f-]+)$/);
   if(destSourceMatch&&method==="DELETE"){if(!await owned(env,"destination_sources",destSourceMatch[1],ctx))return fail("Source assignment not found.",404);await db(env,"destination_sources",`?id=eq.${destSourceMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});return json({ok:true});}
   if(p==="/memes"&&method==="GET")return json({memes:await db(env,"memes",`?${userFilter(ctx)}&select=*&order=created_at.desc&limit=100`)});
+  const memeCaptionEdit=p.match(/^\/memes\/([0-9a-f-]+)\/caption$/);
+  if(memeCaptionEdit&&method==="PATCH"){
+    const memeId=memeCaptionEdit[1];if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
+    const caption=String(body.social_caption??"").trim().toLowerCase().replace(/\s+/g," ");
+    if(caption.length>80||(caption&&!/^[a-z0-9][a-z0-9\x27_-]*(?:\s+[a-z0-9][a-z0-9\x27_-]*)?$/.test(caption)))return fail("Caption must be one or two short words (max 80 characters).");
+    const updated=await db(env,"memes","?id=eq."+memeId+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({social_caption:caption||null})});
+    return json({meme:updated?.[0]});
+  }
   const memeEdit=p.match(/^\/memes\/([0-9a-f-]+)$/);
   if(memeEdit&&method==="PATCH"){
     const memeId=memeEdit[1];if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
@@ -857,9 +890,14 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const decision=body.decision;
     if(!["approved","rejected"].includes(decision))return fail("Decision must be approved or rejected.");
     let publishFormat=body.publish_format||"auto";if(!["photo","reel","auto"].includes(publishFormat))return fail("publish_format must be photo, reel or auto.");
-    const memeReady=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,asset_url,reel_status,reel_asset_url,reel_song_id,output_format`);const ready=memeReady[0];
+    const memeReady=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,asset_url,reel_status,reel_asset_url,reel_song_id,output_format,social_caption,extracted_text,original_caption`);const ready=memeReady[0];
     // auto: about 30% of approved memes become Reels (when a Reel with a song exists), the rest are photo posts.
     if(publishFormat==="auto"){publishFormat=ready?.output_format==="reel"?"reel":"photo";}
+    if(decision==="approved"&&!String(ready?.social_caption||"").trim()){
+      const caption=await generateCaptionWithGroq(env,ctx,ready||{});
+      await db(env,"memes","?id=eq."+memeId+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({social_caption:caption})});
+      ready.social_caption=caption;
+    }
     if(decision==="approved"&&publishFormat==="photo"&&(ready?.processing_status!=="generated"||!ready?.asset_url))return fail("The BRAT final-frame photo asset is not ready yet.",409);
     if(decision==="approved"&&publishFormat==="reel"&&(ready?.reel_status!=="generated"||!ready?.reel_asset_url||!ready?.reel_song_id))return fail("The Reel and selected song are not ready yet.",409);
     if(body.account_id){
@@ -897,7 +935,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   }
   const relMatch=p.match(/^\/relationships\/([0-9a-f-]+)$/);
   if(relMatch&&method==="DELETE") {const r=await db(env,"account_relationships",`?id=eq.${relMatch[1]}&${userFilter(ctx)}&select=id`);if(!r.length)return fail("Relationship not found.",404);await db(env,"account_relationships",`?id=eq.${relMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});return json({ok:true});}
-  if(p==="/assignments"&&method==="GET") return json({assignments:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=*,memes(id,extracted_text,asset_url,source_permalink,classification,reel_asset_url,reel_status,reel_song_id),instagram_accounts(id,username)&order=created_at.desc&limit=300`)});
+  if(p==="/assignments"&&method==="GET") return json({assignments:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=*,memes(id,extracted_text,social_caption,asset_url,source_permalink,classification,reel_asset_url,reel_status,reel_song_id),instagram_accounts(id,username)&order=created_at.desc&limit=300`)});
   const assignmentMatch=p.match(/^\/assignments\/([0-9a-f-]+)$/);
   if(assignmentMatch&&method==="PATCH"){
     const rows=await db(env,"account_meme_assignments",`?id=eq.${assignmentMatch[1]}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("Assignment not found.",404);
@@ -1028,8 +1066,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     return json({assignments:rows},201);
   }
 
-  if(p==="/schedule"&&method==="GET")return json({items:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&scheduled_at=not.is.null&select=*,memes(extracted_text),instagram_accounts(username)&order=scheduled_at.asc`)});
-  if(p==="/publishing"&&method==="GET")return json({items:await db(env,"publishing_history",`?${userFilter(ctx)}&select=*,memes(extracted_text)&order=created_at.desc&limit=100`)});
+  if(p==="/schedule"&&method==="GET")return json({items:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&scheduled_at=not.is.null&select=*,memes(extracted_text,social_caption),instagram_accounts(username)&order=scheduled_at.asc`)});
+  if(p==="/publishing"&&method==="GET")return json({items:await db(env,"publishing_history",`?${userFilter(ctx)}&select=*,memes(extracted_text,social_caption)&order=created_at.desc&limit=100`)});
   if(p==="/analytics"&&method==="GET"){
     const published=await db(env,"publishing_history",`?${userFilter(ctx)}&status=eq.published&select=id`);
     const rows=await db(env,"analytics",`?${userFilter(ctx)}&select=metric_name,metric_value,meme_id,destination_account_id,collected_on&order=collected_on.desc&limit=3000`);
