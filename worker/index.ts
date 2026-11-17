@@ -144,12 +144,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const itemsRes = await fetch(`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=200`,{headers:{Authorization:`Bearer ${secret}`}});
   if (!itemsRes.ok) throw new Error(`Could not retrieve Apify dataset (${itemsRes.status}).`);
   const items:any[] = await itemsRes.json();
-  // Each account has a window: skip what was already scraped (its offset), keep the next 20 posts.
-  const windowNames:string[]=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames.map((u:string)=>String(u).replace(/^@/,"").toLowerCase()):[];
-  const offsetOf:Record<string,number>={};
-  for(const name of windowNames){const rows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(name)}&select=scraped_offset`);offsetOf[name]=Number(rows?.[0]?.scraped_offset||0);}
-  const seenPer:Record<string,number>={};const consumed:Record<string,number>={};
-  const batch=items.filter((item:any)=>{const u=String(item.ownerUsername||item.username||"").toLowerCase();if(!u||!(u in offsetOf))return true;const i=seenPer[u]||0;seenPer[u]=i+1;if(i>=offsetOf[u]&&i<offsetOf[u]+SCRAPE_BATCH){consumed[u]=(consumed[u]||0)+1;return true;}return false;});
+  // Import the full date-filtered dataset; source_post_id deduplication handles overlaps.
+  const batch=items;
   let inserted = 0, skipped = 0, failedMedia = 0;
   for (const item of batch) {
     const n = normalizeApifyItem(item);
@@ -176,9 +172,10 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:n.postId,source_permalink:n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl};
     try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch { skipped++; }
   }
-  for(const name of Object.keys(consumed)){await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(name)}`,{method:"PATCH",body:JSON.stringify({scraped_offset:offsetOf[name]+consumed[name]})});}
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,inserted,skipped,failed_media:failedMedia}})});
-  const scrapedAt=new Date().toISOString();const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];for(const username of sourceNames){const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:scrapedAt,last_scrape_status:"completed"})});}
+  // Anchor the next cursor to run creation, not delayed import completion, so posts
+  // published while a run is executing or awaiting polling are rechecked next time.
+  const cursorAt=job.created_at||new Date().toISOString();const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];for(const username of sourceNames){const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});}
   await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
   return {done:true,status:"SUCCEEDED",items_seen:items.length,inserted,skipped,failed_media:failedMedia};
 }
@@ -482,7 +479,7 @@ async function runWaitingReels(env:Env){
 
 const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
 const SCRAPE_BATCH=20;
-function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH){
+function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null){
   const input=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
   const replace=(value:any):any=>{
     if(typeof value==="string"){if(value==="{{usernames}}")return usernames;if(value==="{{profile_urls}}")return usernames.map(u=>`https://www.instagram.com/${u.replace(/^@/,"")}/`);if(value==="{{start_urls}}")return usernames.map(u=>({url:`https://www.instagram.com/${u.replace(/^@/,"")}/`}));return value;}
@@ -501,6 +498,7 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
     delete result.usernames;
   }else if(!("usernames" in result)&&!("directUrls" in result)&&!("startUrls" in result))result.usernames=usernames;
   result.resultsLimit=limit;
+  if(newerThan)result.onlyPostsNewerThan=newerThan;
   return result;
 }
 
@@ -551,13 +549,13 @@ async function runScheduledDiscovery(env:Env){
     const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&discovery_enabled=eq.true&select=id`);if(!accounts.length)continue;
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let all=false;for(const a of accounts){const own=mappings.filter((m:any)=>m.destination_account_id===a.id);if(!own.length)all=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset`);
+    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at`);
     const selected=all?sources:sources.filter((s:any)=>allowed.has(s.id));if(!selected.length)continue;
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)continue;
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
     if(settingsRows.length){const lock=await db(env,"user_settings",`?${userFilter(ctx)}&or=(discovery_lock_until.is.null,discovery_lock_until.lte.${encodeURIComponent(new Date().toISOString())})`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:lockUntil})});if(!lock?.length)continue;}else{try{await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,discovery_lock_until:lockUntil})});}catch{continue;}}
     let started:any=null,used:any=null;
-    for(const credential of creds){try{const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const input=buildActorInput(credential.actor_input,selected.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR,Math.max(0,...selected.map((s:any)=>Number(s.scraped_offset||0)))+SCRAPE_BATCH);const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});const data:any=await response.json().catch(()=>({}));if(response.ok){started=data;used=credential;break;}await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});}catch{}}
+    for(const credential of creds){try{const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const cursorValues=selected.map((s:any)=>s.last_scraped_at).filter(Boolean).sort();const cursor=cursorValues[0]||null;const input=buildActorInput(credential.actor_input,selected.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,cursor);const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});const data:any=await response.json().catch(()=>({}));if(response.ok){started=data;used=credential;break;}await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});}catch{}}
     if(!started?.data?.id){await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:null})});continue;}
     await db(env,"api_credentials",`?id=eq.${used.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
     await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ownerId,job_type:"discovery",status:"running",provider_run_id:started.data.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:started.data.defaultDatasetId,credential_id:used.id,actor_id:used.actor_id,source_usernames:selected.map((s:any)=>s.username),scheduled:true}})});
@@ -1283,13 +1281,13 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!activeAccounts.length)return fail("Enable discovery on at least one destination account first.");
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let allSources=false;for(const account of activeAccounts){const own=mappings.filter((m:any)=>m.destination_account_id===account.id);if(!own.length)allSources=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset`);
+    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at`);
     const sources=allSources?allSourcesRows:allSourcesRows.filter((source:any)=>allowed.has(source.id));
     if(!sources.length)return fail("Add or assign at least one enabled reference account to a destination with discovery enabled.");
     let started:any=null;let used:any=null;let lastError="No Apify key could start the run.";
     for(const credential of creds){
       try{
-        const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const input=buildActorInput(credential.actor_input,sources.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR,Math.max(0,...sources.map((s:any)=>Number(s.scraped_offset||0)))+SCRAPE_BATCH);
+        const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const cursorValues=sources.map((s:any)=>s.last_scraped_at).filter(Boolean).sort();const cursor=cursorValues[0]||null;const input=buildActorInput(credential.actor_input,sources.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,cursor);
         const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
         const result:any=await response.json().catch(()=>({}));
         if(response.ok){started=result;used=credential;break;}
