@@ -125,3 +125,7 @@ select:focus-visible {
 .posts-per-day .dd { min-width: 92px; }
 .schedule-field .dd { width:100%; min-width:150px; }
 .schedule-field .dd-trigger { min-height:42px; }
+
+/* Help search and readable scheduler frequency control */
+.posts-per-day .dd-trigger{font-size:15px;font-weight:650;min-height:40px;padding:0 12px;}
+.help-panel{max-width:900px}.help-search{display:flex;gap:10px;margin-bottom:18px}.help-search input{flex:1;min-width:0;height:44px;padding:0 14px;border:1px solid var(--border);border-radius:10px;background:var(--panel2);color:var(--text);font-size:14px}.help-result{padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--panel2);margin:12px 0 20px}.help-result h3{margin:8px 0}.help-result p{color:var(--muted);line-height:1.65}.help-topics{display:grid;gap:6px}.help-topics h3{margin:8px 0}.help-topics button{display:flex;justify-content:space-between;align-items:center;text-align:left;padding:12px 4px;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer}.help-topics button:hover{color:var(--accent)}
