@@ -1003,6 +1003,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const retryWaitRows = activeRows.filter((r) => !isLocked(r) && r.processing_next_retry_at && new Date(r.processing_next_retry_at).getTime() > nowMs);
     const generatedIds = new Set(rows.filter((r) => r.processing_status === "generated").map((r) => r.id));
     const pendingApproval = assignments.filter((a) => generatedIds.has(a.meme_id) && a.approval_status === "pending").length;
+    const rejectedCount = rows.filter((r) => r.processing_status === "rejected").length +
+      assignments.filter((a) => generatedIds.has(a.meme_id) && a.approval_status === "rejected").length;
     const flow = [
       { key:"discovered", label:"Discovered", count:total, detail:"All source and manual meme records" },
       { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length + renderRetryRows.length, detail:"Queued now or waiting for retry time" },
@@ -1011,7 +1013,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       { key:"approval", label:"Approval queue", count:pendingApproval, detail:"Generated items awaiting your decision" },
       { key:"scheduled", label:"Scheduled", count:assignments.filter((a) => a.status === "scheduled").length, detail:"Approved destination assignments with a schedule" },
       { key:"published", label:"Published", count:assignments.filter((a) => a.status === "published").length, detail:"Successfully published assignments" },
-      { key:"rejected", label:"Rejected", count:rows.filter((r) => r.processing_status === "rejected").length + assignments.filter((a) => a.approval_status === "rejected").length, detail:"Content or destination assignments rejected" },
+      { key:"rejected", label:"Rejected", count:rejectedCount, detail:"Content or destination assignments rejected" },
       { key:"discarded", label:"Discarded", count:rows.filter((r) => r.processing_status === "discarded").length, detail:"Terminal processing failures; retained for history" },
       { key:"media_unavailable", label:"Media unavailable", count:rows.filter((r) => r.processing_status === "media_unavailable").length, detail:"Source media could not be retrieved" },
       { key:"low_confidence", label:"Low confidence", count:rows.filter((r) => r.processing_status === "low_confidence" || r.classification === "low_confidence").length, detail:"No reliable text extraction; terminal manual-review outcome" },
