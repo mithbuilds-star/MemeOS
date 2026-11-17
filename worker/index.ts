@@ -165,10 +165,35 @@ async function apifyRequestWithFallback(env:Env,ctx:Ctx,url:string){
   throw new Error(lastError);
 }
 
+async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any){
+  const credentialId=job.metadata?.credential_id;
+  if(!credentialId)return apifyRequestWithFallback(env,ctx,url);
+  // Actor runs and datasets belong to the Apify account that started them.
+  // Never poll them with a different user's/key's token: a 403/404 from the
+  // wrong account is not evidence that the fallback key is invalid.
+  const rows=await db(env,"api_credentials",`?id=eq.${encodeURIComponent(credentialId)}&${userFilter(ctx)}&provider=eq.apify&select=*`);
+  const credential=rows?.[0];
+  if(!credential)throw new Error("The Apify key that started this discovery run is no longer available. Re-enable or replace that exact key.");
+  const secret=await decryptSecret(env,credential);
+  const response=await fetch(url,{headers:{Authorization:`Bearer ${secret}`}});
+  if(!response.ok){
+    const data:any=await response.clone().json().catch(()=>({}));
+    const message=data.error?.message||`Apify returned ${response.status} while checking the original discovery run.`;
+    if(isApifyMonthlyLimitError(message))await disableApifyKeyUntilCycleEnds(env,ctx,credential,secret,message);
+    else if(response.status===401)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:new Date().toISOString()})});
+    else if(response.status===429)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+5*60*1000).toISOString(),last_used_at:new Date().toISOString()})});
+    // 403/404/5xx can describe the run/resource, not the credential. Do not
+    // poison the key's API Manager status for those responses.
+    throw new Error(message);
+  }
+  await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+  return response;
+}
+
 async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const runId=job.provider_run_id;
   if(!runId)throw new Error("Discovery job has no Apify run ID.");
-  const statusRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`);
+  const statusRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
   const statusData:any=await statusRes.json().catch(()=>({}));
   const run=statusData.data||{};
   if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status))return {done:false,status:run.status};
@@ -179,7 +204,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
   // Every discovery run is deliberately capped at one 25-post page.
-  const itemsRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`);
+  const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`,job);
   const items:any[]=await itemsRes.json();
   // Backfill runs are bounded by the oldest post in the incremental result.
   // The official Apify actor has no onlyPostsOlderThan input, so enforce the
