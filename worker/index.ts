@@ -935,6 +935,26 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   }
   const relMatch=p.match(/^\/relationships\/([0-9a-f-]+)$/);
   if(relMatch&&method==="DELETE") {const r=await db(env,"account_relationships",`?id=eq.${relMatch[1]}&${userFilter(ctx)}&select=id`);if(!r.length)return fail("Relationship not found.",404);await db(env,"account_relationships",`?id=eq.${relMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});return json({ok:true});}
+
+  if(p==="/scheduler/auto-fill"&&method==="POST"){
+    const ids=Array.isArray(body.assignment_ids)?body.assignment_ids.map((x:any)=>String(x)).slice(0,10):[];
+    const slots=Array.isArray(body.scheduled_at)?body.scheduled_at.slice(0,10):[];
+    if(!ids.length||ids.length!==slots.length)return fail("Choose matching approved posts and future time slots.");
+    const results=[];
+    for(let i=0;i<ids.length;i++){
+      const date=new Date(slots[i]);
+      if(Number.isNaN(date.getTime())||date.getTime()<=Date.now())return fail("Every auto-post slot must be in the future.");
+      const rows=await db(env,"account_meme_assignments",`?id=eq.${ids[i]}&${userFilter(ctx)}&select=*`);
+      if(!rows.length||rows[0].approval_status!=="approved"||rows[0].scheduled_at||!["approved","pending"].includes(rows[0].status))return fail("One of the selected posts is no longer available to schedule.",409);
+      if(rows[0].publish_format==="reel"){
+        const meme=await db(env,"memes",`?id=eq.${rows[0].meme_id}&${userFilter(ctx)}&select=reel_status,reel_song_id`);
+        if(meme[0]?.reel_status!=="generated"||!meme[0]?.reel_song_id)return fail("A selected Reel is not ready yet. Finish rendering and add an enabled song first.",409);
+      }
+      const updated=await db(env,"account_meme_assignments",`?id=eq.${ids[i]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({scheduled_at:date.toISOString(),status:"scheduled",auto_scheduled:true})});
+      results.push(updated?.[0]);
+    }
+    return json({scheduled:results.length,assignments:results});
+  }
   if(p==="/assignments"&&method==="GET") return json({assignments:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=*,memes(id,extracted_text,social_caption,asset_url,source_permalink,classification,reel_asset_url,reel_status,reel_song_id),instagram_accounts(id,username)&order=created_at.desc&limit=300`)});
   const assignmentMatch=p.match(/^\/assignments\/([0-9a-f-]+)$/);
   if(assignmentMatch&&method==="PATCH"){
@@ -942,8 +962,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const patch:any={};if(["pending","approved","rejected"].includes(body.approval_status))patch.approval_status=body.approval_status;
     if(body.rejection_reason!==undefined)patch.rejection_reason=String(body.rejection_reason).slice(0,500);
     if(body.publish_format!==undefined){if(!["photo","reel"].includes(body.publish_format))return fail("publish_format must be photo or reel.");patch.publish_format=body.publish_format;}
-    if(body.scheduled_at!==undefined&&body.scheduled_at!==null){const d=new Date(body.scheduled_at);if(Number.isNaN(d.getTime())||d.getTime()<=Date.now())return fail("Choose a future schedule time.");if(rows[0].approval_status!=="approved"&&patch.approval_status!=="approved")return fail("Approve this account assignment before scheduling.");if(rows[0].publish_format==="reel"){const m=await db(env,"memes",`?id=eq.${rows[0].meme_id}&${userFilter(ctx)}&select=reel_status,reel_song_id`);if(m[0]?.reel_status!=="generated"||!m[0]?.reel_song_id)return fail("This Reel is not ready yet. Add an enabled song and wait for Reel rendering to finish.",409);}patch.scheduled_at=d.toISOString();patch.status="scheduled";}
-    if(body.scheduled_at===null){patch.scheduled_at=null;patch.status="approved";patch.publishing_locked_until=null;patch.publishing_started_at=null;}
+    if(body.scheduled_at!==undefined&&body.scheduled_at!==null){const d=new Date(body.scheduled_at);if(Number.isNaN(d.getTime())||d.getTime()<=Date.now())return fail("Choose a future schedule time.");if(rows[0].approval_status!=="approved"&&patch.approval_status!=="approved")return fail("Approve this account assignment before scheduling.");if(rows[0].publish_format==="reel"){const m=await db(env,"memes",`?id=eq.${rows[0].meme_id}&${userFilter(ctx)}&select=reel_status,reel_song_id`);if(m[0]?.reel_status!=="generated"||!m[0]?.reel_song_id)return fail("This Reel is not ready yet. Add an enabled song and wait for Reel rendering to finish.",409);}patch.scheduled_at=d.toISOString();patch.status="scheduled";patch.auto_scheduled=false;}
+    if(body.scheduled_at===null){patch.scheduled_at=null;patch.status="approved";patch.auto_scheduled=false;patch.publishing_locked_until=null;patch.publishing_started_at=null;}
     const updated=await db(env,"account_meme_assignments",`?id=eq.${assignmentMatch[1]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});return json({assignment:updated?.[0]});
   }
   if (p === "/pipeline" && method === "GET") {
@@ -1023,7 +1043,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=neq.discarded&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: new Date().toISOString(), processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
   }
-  if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata"}});}
+  if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata",auto_post_enabled:false,posts_per_day:3}});}
   const processMatch=p.match(/^\/memes\/([0-9a-f-]+)\/process$/);
   if(processMatch&&method==="POST"){
     const memeId=processMatch[1];const rows=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("Meme not found.",404);
@@ -1133,7 +1153,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const current=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
     const patch:any={owner_id:ctx.userId};
     if(typeof body.global_paused==="boolean")patch.global_paused=body.global_paused;
-    if(typeof body.auto_process_enabled==="boolean")patch.auto_process_enabled=body.auto_process_enabled;
+    if(typeof body.auto_process_enabled==="boolean")patch.auto_process_enabled=body.auto_process_enabled;if(typeof body.auto_post_enabled==="boolean")patch.auto_post_enabled=body.auto_post_enabled;if(body.posts_per_day!==undefined){const n=Number(body.posts_per_day);if(!Number.isInteger(n)||n<1||n>10)return fail("Posts per day must be between 1 and 10.");patch.posts_per_day=n;}
     if(body.video_freeze_seconds!==undefined){const n=Number(body.video_freeze_seconds);if(!Number.isFinite(n)||n<0||n>5)return fail("Reel final-frame freeze must be between 0 and 5 seconds.");patch.video_freeze_seconds=n; }
     if(body.discovery_interval_minutes!==undefined){const n=Number(body.discovery_interval_minutes);if(![15,30,60,120,360,720,1440].includes(n))return fail("Choose a supported discovery interval.");patch.discovery_interval_minutes=n;}
     if(current.length){await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});}
@@ -1215,7 +1235,7 @@ export default {
       for(const setting of analyticsOwners){if(setting.global_paused)continue;if(setting.last_analytics_sync_at&&Date.now()-new Date(setting.last_analytics_sync_at).getTime()<6*60*60*1000)continue;const ctx:Ctx={userId:setting.owner_id,token:""};try{await syncMetaAnalyticsForOwner(env,ctx);await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_analytics_sync_at:new Date().toISOString()})});}catch{}}}catch(e:any){console.error("Analytics sync phase failed",String(e?.message||e));}
     const expiredPublishing=await db(env,"account_meme_assignments",`?status=eq.publishing&publishing_locked_until=lt.${encodeURIComponent(now)}&select=id,owner_id&limit=50`);
     for(const item of expiredPublishing){const ctx:Ctx={userId:item.owner_id,token:""};await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.publishing`,{method:"PATCH",body:JSON.stringify({status:"needs_review",publishing_locked_until:null,rejection_reason:"Publishing worker lease expired. Check Instagram before retrying to avoid a duplicate post."})});}
-    const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id&order=scheduled_at.asc&limit=25`);
+    const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id,auto_scheduled&order=scheduled_at.asc&limit=25`);
     for(const item of due){
       const ctx:Ctx={userId:item.owner_id,token:""};const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)continue;
       const lease=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.scheduled&approval_status=eq.approved&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({status:"publishing",publishing_started_at:now,publishing_locked_until:new Date(Date.now()+10*60*1000).toISOString()})});
