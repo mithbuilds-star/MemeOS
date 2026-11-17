@@ -172,7 +172,7 @@ textarea::-webkit-scrollbar-thumb:hover{background:var(--accent)}
 .dd-menu{z-index:1200}
 .schedule-card{position:relative;overflow:visible}
 .schedule-card.calendar-open{z-index:500}
-.calendar-field{z-index:501}
+.schedule-card.calendar-open .calendar-field{z-index:501}
 .calendar-popover{z-index:1500}
 .schedule-card-controls,.schedule-card-main{overflow:visible}
 
