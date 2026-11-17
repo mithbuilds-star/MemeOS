@@ -284,10 +284,10 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       const backfillBefore=source.backfill_before||oldest||job.metadata?.last_successful_scrape_at||job.created_at||null;
       const cursorAt=job.created_at||new Date().toISOString();
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed",...(backfillBefore?{backfill_before:backfillBefore}:{})})});
-      // Fewer than five genuinely new posts is the signal to fetch the next
-      // historical page. This starts exactly one 25-post page; the next page is
+      // Fewer than five successfully inserted (non-duplicate) posts is the signal
+      // to fetch the next historical page. This starts exactly one 25-post page; the next page is
       // only requested after a later incremental scan again finds <5 new posts.
-      if(batch.length<SCRAPE_BACKFILL_THRESHOLD&&backfillBefore&&!source.backfill_complete){
+      if(inserted<SCRAPE_BACKFILL_THRESHOLD&&backfillBefore&&!source.backfill_complete){
         const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(source.id)}&metadata->>phase=eq.backfill&select=id&limit=1`);
         if(!active.length){
           const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
