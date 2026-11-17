@@ -565,21 +565,49 @@ async function connectMetaSystemUserToken(env: Env, ctx: Ctx, accountId: string,
     assetUrl.searchParams.set("access_token", accessToken);
     const assetRes = await fetch(assetUrl.toString());
     const asset: any = await assetRes.json().catch(() => ({}));
-    if (!assetRes.ok) {
-      lastAssetError = asset.error?.message || "Meta could not read the supplied Instagram asset.";
-      continue;
+    const expectedUsername = String(destination.username).replace(/^@/, "").toLowerCase();
+
+    // A Business Portfolio asset exposes ig_user_id/ig_username. Some IDs
+    // supplied from Meta's account-details panel resolve directly to an IGUser,
+    // which instead exposes id/username. Support both documented object shapes.
+    if (assetRes.ok) {
+      const assetUsername = String(asset.ig_username || "").replace(/^@/, "").toLowerCase();
+      const igUserId = String(asset.ig_user_id || "");
+      if (assetUsername === expectedUsername && /^\\d{5,30}$/.test(igUserId)) {
+        selected = {
+          id: igUserId,
+          username: assetUsername,
+          account_type: "BUSINESS",
+          profile_picture_url: null,
+          business_asset_id: String(asset.id || candidate)
+        };
+        break;
+      }
+    } else {
+      lastAssetError = asset.error?.message || "Meta could not read the supplied Instagram Business Asset.";
     }
-    const assetUsername = String(asset.ig_username || asset.username || "").replace(/^@/, "").toLowerCase();
-    const igUserId = String(asset.ig_user_id || "");
-    if (assetUsername === String(destination.username).replace(/^@/, "").toLowerCase() && /^\\d{5,30}$/.test(igUserId)) {
-      selected = {
-        id: igUserId,
-        username: assetUsername,
-        account_type: "BUSINESS",
-        profile_picture_url: null,
-        business_asset_id: String(asset.id || candidate)
-      };
-      break;
+
+    // Fallback: the supplied identifier may already be the IG User ID.
+    const userUrl = new URL("https://graph.facebook.com/" + version + "/" + encodeURIComponent(candidate));
+    userUrl.searchParams.set("fields", "id,username,profile_picture_url");
+    userUrl.searchParams.set("access_token", accessToken);
+    const userRes = await fetch(userUrl.toString());
+    const user: any = await userRes.json().catch(() => ({}));
+    if (userRes.ok) {
+      const userUsername = String(user.username || "").replace(/^@/, "").toLowerCase();
+      const userId = String(user.id || "");
+      if (userUsername === expectedUsername && /^\\d{5,30}$/.test(userId)) {
+        selected = {
+          id: userId,
+          username: userUsername,
+          account_type: "BUSINESS",
+          profile_picture_url: user.profile_picture_url || null,
+          business_asset_id: candidate
+        };
+        break;
+      }
+    } else if (user.error?.message) {
+      lastAssetError = user.error.message;
     }
   }
   if (!selected) {
