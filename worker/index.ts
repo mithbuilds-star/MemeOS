@@ -991,12 +991,14 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const nowMs = Date.now();
     const isLocked = (r: any) => (r.processing_locked_until && new Date(r.processing_locked_until).getTime() > nowMs) || (r.reel_render_locked_until && new Date(r.reel_render_locked_until).getTime() > nowMs);
     const terminal = (r: any) => ["discarded","media_unavailable","low_confidence"].includes(r.processing_status || "") || r.classification === "low_confidence";
-    const items = rows.filter((r) => !terminal(r) && !["generated","rejected"].includes(r.processing_status || "") &&
-      !["generated","rejected","discarded","media_unavailable","low_confidence"].includes(r.reel_status || "")
+    const items = rows.filter((r) => !terminal(r) &&
+      (!["generated","rejected"].includes(r.processing_status || "") || ["render_failed","renderer_not_configured"].includes(r.reel_status || "")) &&
+      !["discarded","media_unavailable","low_confidence"].includes(r.reel_status || "")
     ).slice(0, 200);
     const total = rows.length;
     const activeRows = rows.filter((r) => ["needs_ocr","ocr_complete","ready_for_asset"].includes(r.processing_status) && !terminal(r));
-    const runningRows = activeRows.filter(isLocked);
+    const renderRetryRows = rows.filter((r) => ["ready_for_asset","generated"].includes(r.processing_status) && ["render_failed","renderer_not_configured","render_requested"].includes(r.reel_status) && !terminal(r));
+    const runningRows = rows.filter((r) => (activeRows.includes(r) || (r.processing_status === "generated" && r.reel_status === "rendering")) && isLocked(r));
     const readyQueueRows = activeRows.filter((r) => !isLocked(r) && (!r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs));
     const retryWaitRows = activeRows.filter((r) => !isLocked(r) && r.processing_next_retry_at && new Date(r.processing_next_retry_at).getTime() > nowMs);
     const generatedIds = new Set(rows.filter((r) => r.processing_status === "generated").map((r) => r.id));
