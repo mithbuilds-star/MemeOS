@@ -997,7 +997,6 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     ).slice(0, 200);
     const total = rows.length;
     const activeRows = rows.filter((r) => ["needs_ocr","ocr_complete","ready_for_asset"].includes(r.processing_status) && !terminal(r));
-    const renderRetryRows = rows.filter((r) => ["ready_for_asset","generated"].includes(r.processing_status) && ["render_failed","renderer_not_configured","render_requested"].includes(r.reel_status) && !terminal(r));
     const legacyFailedRows = rows.filter((r) => ["failed","processing_failed"].includes(r.processing_status) && !terminal(r));
     const runningRows = rows.filter((r) => (activeRows.includes(r) || (r.processing_status === "generated" && r.reel_status === "rendering")) && isLocked(r));
     const readyQueueRows = activeRows.filter((r) => !isLocked(r) && (!r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs));
@@ -1008,7 +1007,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       assignments.filter((a) => generatedIds.has(a.meme_id) && a.approval_status === "rejected").length;
     const flow = [
       { key:"discovered", label:"Discovered", count:total, detail:"All source and manual meme records" },
-      { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length + renderRetryRows.length + legacyFailedRows.length, detail:"Queued, waiting for retry time or needing a legacy failure reset" },
+      { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length + rows.filter((r) => ["ready_for_asset","generated"].includes(r.processing_status) && ["render_failed","renderer_not_configured","render_requested"].includes(r.reel_status) && !terminal(r)).length + legacyFailedRows.length, detail:"Queued, waiting for retry time or needing a legacy failure reset" },
       { key:"processing", label:"Processing", count:runningRows.length, detail:"OCR, classification or render work in progress" },
       { key:"processed", label:"Processed", count:rows.filter((r) => r.processing_status === "generated").length, detail:"Assets generated and ready for approval" },
       { key:"approval", label:"Approval queue", count:pendingApproval, detail:"Generated items awaiting your decision" },
