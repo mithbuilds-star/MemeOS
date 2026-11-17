@@ -553,7 +553,8 @@ async function runWaitingReels(env:Env){
 }
 
 const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
-const SCRAPE_BATCH=10000;\nconst SCRAPE_BACKFILL_THRESHOLD=5;
+const SCRAPE_BATCH=10000;
+const SCRAPE_BACKFILL_THRESHOLD=5;
 
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false){
   let lastError="No Apify key could start the run.";
