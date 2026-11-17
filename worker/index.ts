@@ -225,15 +225,23 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // cutoff locally after fetching its maximum timeline; compatible custom actors
   // can also apply the same cutoff server-side.
   const backfillBefore=job.metadata?.phase==="backfill"&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
-  // Coregent's postsNewerThan input has day-level precision. Applying the
-  // exact last_scraped_at timestamp again here incorrectly drops every post
-  // published earlier on that same day. For incremental discovery, trust the
-  // actor's newest-first page and deduplicate by Instagram post ID below.
-  // Only historical backfill needs a local timestamp cutoff.
-  const batch=backfillBefore?items.filter((item:any)=>{
-    const postedAt=normalizeApifyItem(item).postedAt;
-    return !!postedAt&&Date.parse(postedAt)<backfillBefore;
-  }):items;
+  // Apply the exact saved timestamp locally as a second guard. Coregent accepts
+  // ISO date-times for both newer-than and older-than filters; truncating the
+  // incremental cursor to a calendar day caused the same day's posts to be
+  // fetched repeatedly and then counted as duplicates on every run.
+  const incrementalCursor=!isBackfill&&job.metadata?.last_successful_scrape_at
+    ?Date.parse(job.metadata.last_successful_scrape_at):null;
+  const batch=isBackfill&&backfillBefore
+    ?items.filter((item:any)=>{
+      const postedAt=normalizeApifyItem(item).postedAt;
+      return !!postedAt&&Date.parse(postedAt)<backfillBefore;
+    })
+    :Number.isFinite(incrementalCursor)
+      ?items.filter((item:any)=>{
+        const postedAt=normalizeApifyItem(item).postedAt;
+        return !!postedAt&&Date.parse(postedAt)>incrementalCursor!;
+      })
+      :items;
   let inserted = 0, skipped = items.length-batch.length, failedMedia = 0;
   for (const item of batch) {
     const n = normalizeApifyItem(item);
@@ -613,6 +621,10 @@ const DEFAULT_APIFY_ACTOR = "coregent/instagram-posts-scraper";
 const SCRAPE_BATCH=25;
 const SCRAPE_BACKFILL_THRESHOLD=5;
 
+async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
+  const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
+  return active.length>0;
+}
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null){
   let lastError="No Apify key could start the run.";
   for(const credential of credentials){
@@ -662,7 +674,7 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
   input.resultsLimit=Math.max(1,Math.min(100,limit));
   if(newerThan){
     const parsed=new Date(newerThan);
-    if(!Number.isNaN(parsed.getTime()))input.postsNewerThan=parsed.toISOString().slice(0,10);
+    if(!Number.isNaN(parsed.getTime()))input.postsNewerThan=parsed.toISOString();
   }
   if(olderThan){
     const parsed=new Date(olderThan);
@@ -805,7 +817,12 @@ async function runScheduledDiscovery(env:Env){
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
     if(settingsRows.length){const lock=await db(env,"user_settings",`?${userFilter(ctx)}&or=(discovery_lock_until.is.null,discovery_lock_until.lte.${encodeURIComponent(new Date().toISOString())})`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:lockUntil})});if(!lock?.length)continue;}else{try{await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,discovery_lock_until:lockUntil})});}catch{continue;}}
     let startedCount=0;
-    for(const source of selected){try{await startApifyDiscoveryForSource(env,ctx,source,creds,true);startedCount++;}catch(e:any){console.error("Scheduled discovery start failed",source.username,String(e?.message||e));}}
+    for(const source of selected){
+      try{
+        if(await hasActiveDiscoveryForSource(env,ctx,source.id))continue;
+        await startApifyDiscoveryForSource(env,ctx,source,creds,true);startedCount++;
+      }catch(e:any){console.error("Scheduled discovery start failed",source.username,String(e?.message||e));}
+    }
     if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:startedCount?new Date().toISOString():settings.last_discovery_started_at,discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,last_discovery_started_at:startedCount?new Date().toISOString():null,discovery_interval_minutes:60,discovery_lock_until:null})});
   }
 }
@@ -1544,7 +1561,12 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const sources=allSources?allSourcesRows:allSourcesRows.filter((source:any)=>allowed.has(source.id));
     if(!sources.length)return fail("Add or assign at least one enabled reference account to a destination with discovery enabled.");
     const jobs:any[]=[];const errors:string[]=[];
-    for(const source of sources){try{jobs.push(await startApifyDiscoveryForSource(env,ctx,source,creds,false));}catch(e:any){errors.push(e?.message||String(e));}}
+    for(const source of sources){
+      try{
+        if(await hasActiveDiscoveryForSource(env,ctx,source.id)){errors.push(`@${source.username}: a discovery run is already active; skipped a duplicate run.`);continue;}
+        jobs.push(await startApifyDiscoveryForSource(env,ctx,source,creds,false));
+      }catch(e:any){errors.push(e?.message||String(e));}
+    }
     if(!jobs.length)return fail(errors.join(" ")||"No source account could start a discovery run.",502);
     const settingsRow=await db(env,"user_settings",`?${userFilter(ctx)}&select=owner_id`);if(settingsRow.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:new Date().toISOString(),discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,last_discovery_started_at:new Date().toISOString(),discovery_interval_minutes:60,discovery_lock_until:null})});
     return json({job_id:jobs[0]?.id,provider_run_id:jobs[0]?.provider_run_id,jobs:jobs.map((job:any)=>({job_id:job.id,provider_run_id:job.provider_run_id,source_username:job.metadata?.source_usernames?.[0]})),started:jobs.length,errors},202);
