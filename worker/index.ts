@@ -378,7 +378,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
 
 async function runBackgroundProcessing(env:Env){
   const nowIso=new Date().toISOString();
-  const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&or=(processing_locked_until.is.null,processing_locked_until.lte.${encodeURIComponent(nowIso)})&select=*&order=created_at.asc&limit=25`);
+  const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&or=(processing_locked_until.is.null,processing_locked_until.lte.${encodeURIComponent(nowIso)})&classification=neq.low_confidence&select=*&order=created_at.asc&limit=25`);
   let processed=0;
   // Keep working through the queue within this tick (about 45 s), so the next item starts as soon as the last one finishes.
   const tickStart=Date.now();
@@ -438,15 +438,15 @@ async function runWaitingReels(env:Env){
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
   const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_consecutive_errors,processing_same_error_count,processing_last_error_key,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
-  const auto=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
-  const manual=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
+  const auto=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
+  const manual=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
   const pending=[...auto,...manual].slice(0,10);
   for(const meme of pending){
     const ctx:Ctx={userId:meme.owner_id,token:""};
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
     if(settings[0]?.global_paused||settings[0]?.auto_process_enabled===false)continue;
     const leaseToken=crypto.randomUUID();
-    const lease=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&reel_status=eq.${meme.reel_status}&or=(reel_render_locked_until.is.null,reel_render_locked_until.lte.${encodeURIComponent(nowIso)})`,{method:"PATCH",body:JSON.stringify({reel_render_locked_until:new Date(Date.now()+L.leaseMs()).toISOString(),processing_token:leaseToken})});
+    const lease=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=eq.${meme.reel_status}&or=(reel_render_locked_until.is.null,reel_render_locked_until.lte.${encodeURIComponent(nowIso)})`,{method:"PATCH",body:JSON.stringify({reel_render_locked_until:new Date(Date.now()+L.leaseMs()).toISOString(),processing_token:leaseToken})});
     if(!lease?.length)continue;
     try{
       const result:any=await renderReelForMeme(env,meme,leaseToken);
@@ -882,7 +882,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const rows:any[]=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=id,processing_status,asset_url,reel_asset_url,reel_status`);
     const m=rows?.[0];
     if(!m)return fail("Meme not found.",404);
-    if(["discarded","media_unavailable","low_confidence"].includes(m.processing_status))return fail("This item is terminal and cannot be converted or rendered again.",409);
+    if(["discarded","media_unavailable","low_confidence"].includes(m.processing_status)||m.classification==="low_confidence")return fail("This item is terminal and cannot be converted or rendered again.",409);
     if(format==="photo"){
       await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"photo"})});
       return json({output_format:"photo",ready:!!m.asset_url});
@@ -1003,7 +1003,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const pendingApproval = assignments.filter((a) => generatedIds.has(a.meme_id) && a.approval_status === "pending").length;
     const flow = [
       { key:"discovered", label:"Discovered", count:total, detail:"All source and manual meme records" },
-      { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length, detail:"Queued now or waiting for retry time" },
+      { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length + renderRetryRows.length, detail:"Queued now or waiting for retry time" },
       { key:"processing", label:"Processing", count:runningRows.length, detail:"OCR, classification or render work in progress" },
       { key:"processed", label:"Processed", count:rows.filter((r) => ["generated","rejected"].includes(r.processing_status)).length, detail:"Generation completed or content classified out" },
       { key:"approval", label:"Approval queue", count:pendingApproval, detail:"Generated items awaiting your decision" },
@@ -1054,9 +1054,9 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     // Only active, non-terminal pipeline stages can be retried. Error streak counters are deliberately preserved.
     const reset = { processing_attempts:0, processing_error:null, processing_next_retry_at:null, processing_locked_until:null, reel_render_locked_until:null, reel_render_next_retry_at:null };
     const groups = [
-      { filter:"processing_status=in.(needs_ocr,failed,processing_failed)&extracted_text=is.null", status:"needs_ocr" },
+      { filter:"processing_status=in.(needs_ocr,failed,processing_failed)&classification=neq.low_confidence&extracted_text=is.null", status:"needs_ocr" },
       { filter:"processing_status=in.(ocr_complete,ready_for_asset,failed,processing_failed)&extracted_text=not.is.null&classification=eq.suitable", status:"ready_for_asset" },
-      { filter:"processing_status=in.(ocr_complete,failed,processing_failed)&extracted_text=not.is.null&classification=neq.suitable", status:"ocr_complete" },
+      { filter:"processing_status=in.(ocr_complete,failed,processing_failed)&extracted_text=not.is.null&classification=neq.suitable&classification=neq.low_confidence", status:"ocr_complete" },
     ];
     let requeued = 0;
     for (const g of groups) {
