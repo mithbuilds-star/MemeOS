@@ -129,3 +129,58 @@ select:focus-visible {
 /* Help search and readable scheduler frequency control */
 .posts-per-day .dd-trigger{font-size:15px;font-weight:650;min-height:40px;padding:0 12px;}
 .help-panel{max-width:900px}.help-search{display:flex;gap:10px;margin-bottom:18px}.help-search input{flex:1;min-width:0;height:44px;padding:0 14px;border:1px solid var(--border);border-radius:10px;background:var(--panel2);color:var(--text);font-size:14px}.help-result{padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--panel2);margin:12px 0 20px}.help-result h3{margin:8px 0}.help-result p{color:var(--muted);line-height:1.65}.help-topics{display:grid;gap:6px}.help-topics h3{margin:8px 0}.help-topics button{display:flex;justify-content:space-between;align-items:center;text-align:left;padding:12px 4px;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer}.help-topics button:hover{color:var(--accent)}
+
+
+/* Shared compact scrollbar styling, matching the sidebar list. */
+*{scrollbar-width:thin;scrollbar-color:#4a4a4a transparent}
+*::-webkit-scrollbar{width:6px;height:6px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:#3b3b3b;border-radius:20px;border:1px solid var(--panel)}
+*::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+.dd-list::-webkit-scrollbar{width:6px}
+.dd-list::-webkit-scrollbar-track{background:transparent;margin:5px 0}
+.dd-list::-webkit-scrollbar-thumb{background:#3b3b3b;border-radius:20px;border:1px solid var(--panel)}
+textarea::-webkit-scrollbar{width:6px}
+textarea::-webkit-scrollbar-track{background:transparent}
+textarea::-webkit-scrollbar-thumb{background:#3b3b3b;border-radius:20px;border:1px solid var(--panel)}
+textarea::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+
+/* Top-right account menu. */
+.topbar-spacer{flex:1}
+.profile-menu-wrap{position:relative}
+.profile-avatar{border:1px solid var(--border);cursor:pointer}
+.profile-avatar:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.profile-menu{position:absolute;right:0;top:calc(100% + 10px);width:230px;padding:7px;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 18px 48px #0005;z-index:1000}
+.profile-menu-user{padding:10px 11px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.profile-menu button{width:100%;display:flex;align-items:center;gap:10px;padding:11px;border:0;border-radius:9px;background:transparent;color:var(--text);text-align:left;font-size:12px}
+.profile-menu button:hover{background:var(--panel2)}
+.profile-menu .profile-signout{color:var(--danger)}
+.sidebar-bottom,.workspace-label,.plan-card,.connection-pill,.crumb{display:none!important}
+
+/* Discovery schedule and paired library filters. */
+.discovery-next-run{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px;padding:16px 18px}
+.discovery-next-run b,.discovery-next-run strong{display:block}
+.discovery-next-run b{font-size:11px;color:var(--muted);margin-bottom:5px}
+.discovery-next-run strong{font-size:17px;font-weight:650}
+.discovery-next-run>small{color:var(--muted);font-size:11px}
+.library-filters{display:flex;align-items:center;gap:8px;min-width:0}
+.library-filters .dd{min-width:150px}
+
+/* Scheduler controls stay above adjacent cards and use readable controls. */
+.posts-per-day .dd-trigger{font-size:16px!important;font-weight:650;min-height:42px;padding:0 12px}
+.posts-per-day .dd-menu{z-index:1200}
+.dd-menu{z-index:1200}
+.schedule-card{position:relative;overflow:visible}
+.schedule-card.calendar-open{z-index:500}
+.calendar-field{z-index:501}
+.calendar-popover{z-index:1500}
+.schedule-card-controls,.schedule-card-main{overflow:visible}
+
+/* Custom range control for Reel final-frame freeze. */
+input[type="range"]{appearance:none;-webkit-appearance:none;width:100%;height:28px;background:transparent;cursor:pointer;accent-color:var(--accent)}
+input[type="range"]::-webkit-slider-runnable-track{height:7px;border-radius:99px;background:var(--panel2);border:1px solid var(--border)}
+input[type="range"]::-moz-range-track{height:7px;border-radius:99px;background:var(--panel2);border:1px solid var(--border)}
+input[type="range"]::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:19px;height:19px;margin-top:-7px;border-radius:50%;background:var(--accent);border:3px solid var(--panel);box-shadow:0 0 0 1px var(--accent)}
+input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);border:3px solid var(--panel);box-shadow:0 0 0 1px var(--accent)}
+input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:99px}
+@media(max-width:640px){.discovery-next-run{align-items:flex-start;flex-direction:column}.library-filters{width:100%;flex-wrap:wrap}.library-filters .dd{flex:1;min-width:125px}}
