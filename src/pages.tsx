@@ -134,8 +134,8 @@ export function InstagramDashboard() {
       <label>System User Access Token
         <input type="password" autoComplete="off" value={accessToken} onChange={(e) => setAccessToken(e.target.value)} placeholder="Paste your Meta access token"/>
       </label>
-      <label>Instagram Account ID <span className="muted">(optional, only if Meta cannot identify the asset)</span>
-        <input inputMode="numeric" value={instagramAccountId} onChange={(e) => setInstagramAccountId(e.target.value)} placeholder="Numeric Instagram professional account ID"/>
+      <label>Instagram Business Asset ID <span className="muted">(optional, from Meta Business Settings → Accounts → Instagram accounts)</span>
+        <input inputMode="numeric" value={instagramAccountId} onChange={(e) => setInstagramAccountId(e.target.value)} placeholder="Numeric Instagram Business Asset ID"/>
       </label>
       <div className="notice">BRATLOOP validates the token with Meta, checks that it has Instagram basic and content-publishing permissions, verifies the selected destination username, and encrypts the token before saving.</div>
       <button className="btn primary" onClick={connect} disabled={!accessToken.trim() || !!busy}>{busy === connectingAccount ? <Loader2 size={14} className="spin"/> : <CheckCircle2 size={14}/>} Verify and connect</button>
