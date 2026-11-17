@@ -730,7 +730,21 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     const isReel = meme.output_format === "reel";
     const mediaUrl = isReel ? meme.reel_asset_url : meme.asset_url;
     if (!mediaUrl) throw new Error(isReel ? "The Reel file is missing. Reprocess this meme." : "The photo file is missing. Reprocess this meme.");
-    if (!isReel && !/\.jpe?g(?:\?|$)/i.test(mediaUrl)) throw new Error("Instagram photo publishing requires a JPEG asset. Reprocess this meme to generate the new JPEG photo output.");
+    if (!isReel && !/\.jpe?g(?:[?#]|$)/i.test(mediaUrl)) {
+      // Older workspace rows may still point at the legacy PNG poster. Queue a
+      // fresh render and release the schedule instead of logging a doomed publish.
+      await db(env, "memes", `?id=eq.${encodeURIComponent(meme.id)}&${userFilter(ctx)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ reel_status: "render_requested", reel_render_next_retry_at: null, reel_render_locked_until: null })
+      });
+      await setAssignment({
+        status: "approved",
+        scheduled_at: null,
+        publishing_locked_until: null,
+        rejection_reason: "The photo asset was an older PNG. A fresh JPEG render was queued; schedule it again when rendering finishes."
+      });
+      return;
+    }
 
     const token = await decryptSecret(env, { encrypted_secret: account.meta_access_token_enc, encryption_iv: account.meta_access_token_iv });
     const version = env.META_GRAPH_VERSION || "v27.0";
