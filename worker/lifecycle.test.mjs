@@ -118,10 +118,10 @@ test("a render dispatch is not reclaimed until the watchdog, and counts as an at
   assert.equal(after.processing_attempts, 1);
 });
 
-test("renders stop after the maximum number of attempts", () => {
-  const row = base({ processing_status: "ready_for_asset", processing_attempts: 3 });
-  assert.equal(L.shouldFailRender(row), true);
-  assert.equal(L.shouldFailRender({ ...row, processing_attempts: 2 }), false);
+test("render dispatch attempts do not exhaust retries; only the error streak does", () => {
+  const row = base({ processing_status: "ready_for_asset", processing_attempts: 9 });
+  assert.equal(L.shouldFailRender(row), false);
+  assert.equal(L.shouldFailRender({ ...row, processing_consecutive_errors: 5 }), true);
 });
 
 test("the lifecycle only moves forward: retry_wait backoff grows and is capped", () => {
