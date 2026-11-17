@@ -340,7 +340,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
       LOG("status_change",{meme_id:current.id,previous_status:"needs_ocr",new_status:"low_confidence",worker_id:token});
       return {status:"manual_review",reason:"No readable text"};
     }
-    const rows=await memeWrite(env,ctx,current.id,token,{extracted_text:extracted,ocr_confidence:null,processing_status:"ocr_complete",classification:"needs_review",classification_reason:"Server-side OCR completed. OCR confidence is not provided by the vision model; verify the transcription before approval.",processing_error:null,processing_next_retry_at:null});
+    const rows=await memeWrite(env,ctx,current.id,token,{extracted_text:extracted,ocr_confidence:null,processing_status:"ocr_complete",classification:"needs_review",classification_reason:"Server-side OCR completed. OCR confidence is not provided by the vision model; verify the transcription before approval.",processing_error:null,processing_consecutive_errors:0,processing_same_error_count:0,processing_last_error_key:null,processing_next_retry_at:null});
     LOG("status_change",{meme_id:current.id,previous_status:"needs_ocr",new_status:"ocr_complete",worker_id:token,database_update:"ok"});
     current=rows?.[0]||{...current,extracted_text:extracted,processing_status:"ocr_complete"};
   }
@@ -358,7 +358,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
     const classification=await withTimeout(classifyTextWithGroq(env,ctx,current.extracted_text),timeoutMs,"Classification request");
     LOG("classify_request",{meme_id:current.id,worker_id:token,duration_ms:Date.now()-started,provider:"groq"});
     const next=classification.suitable?"ready_for_asset":"rejected";
-    const rows=await memeWrite(env,ctx,current.id,token,{classification:classification.suitable?"suitable":"rejected",classification_reason:classification.reason,processing_status:next,processing_error:null,processing_next_retry_at:null});
+    const rows=await memeWrite(env,ctx,current.id,token,{classification:classification.suitable?"suitable":"rejected",classification_reason:classification.reason,processing_status:next,processing_error:null,processing_consecutive_errors:0,processing_same_error_count:0,processing_last_error_key:null,processing_next_retry_at:null});
     LOG("status_change",{meme_id:current.id,previous_status:"ocr_complete",new_status:next,worker_id:token});
     current=rows?.[0]||{...current,classification:classification.suitable?"suitable":"rejected",processing_status:next};
   }
@@ -378,7 +378,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
 
 async function runBackgroundProcessing(env:Env){
   const nowIso=new Date().toISOString();
-  const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&select=*&order=created_at.asc&limit=1`);
+  const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&or=(processing_locked_until.is.null,processing_locked_until.lte.${encodeURIComponent(nowIso)})&select=*&order=created_at.asc&limit=25`);
   let processed=0;
   // Keep working through the queue within this tick (about 45 s), so the next item starts as soon as the last one finishes.
   const tickStart=Date.now();
@@ -407,7 +407,7 @@ async function runBackgroundProcessing(env:Env){
     try{
       const result:any=await processMemeInBackground(env,row,token);
       if(result.status==="attempts_exhausted"){
-        await memeWrite(env,ctx,meme.id,token,{processing_status:"discarded",processing_locked_until:null,processing_token:null,processing_next_retry_at:null,processing_failed_at:new Date().toISOString(),processing_error:`Automatically discarded after ${L.DEFAULTS.maxAttempts} failed attempts. The record and media are kept.`});
+        await memeWrite(env,ctx,meme.id,token,{processing_status:"discarded",reel_status:"discarded",processing_locked_until:null,processing_token:null,processing_next_retry_at:null,reel_render_next_retry_at:null,reel_render_locked_until:null,processing_failed_at:new Date().toISOString(),processing_error:`Automatically discarded after 3 identical consecutive errors or 5 consecutive errors. The record and media are kept.`});
         LOG("status_change",{meme_id:meme.id,previous_status:meme.processing_status,new_status:"discarded",worker_id:token,attempt:Number(row.processing_attempts||0),reason:"max attempts exhausted"});
       }else{
         LOG("attempt_end",{meme_id:meme.id,worker_id:token,result:result.status});
@@ -446,12 +446,12 @@ async function runWaitingReels(env:Env){
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
     if(settings[0]?.global_paused||settings[0]?.auto_process_enabled===false)continue;
     const leaseToken=crypto.randomUUID();
-    const lease=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&processing_status=neq.discarded&reel_status=eq.${meme.reel_status}&or=(reel_render_locked_until.is.null,reel_render_locked_until.lte.${encodeURIComponent(nowIso)})`,{method:"PATCH",body:JSON.stringify({reel_render_locked_until:new Date(Date.now()+L.leaseMs()).toISOString(),processing_token:leaseToken})});
+    const lease=await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&reel_status=eq.${meme.reel_status}&or=(reel_render_locked_until.is.null,reel_render_locked_until.lte.${encodeURIComponent(nowIso)})`,{method:"PATCH",body:JSON.stringify({reel_render_locked_until:new Date(Date.now()+L.leaseMs()).toISOString(),processing_token:leaseToken})});
     if(!lease?.length)continue;
     try{
       const result:any=await renderReelForMeme(env,meme,leaseToken);
       const patch:any={reel_render_locked_until:null};
-      if(result.status==="attempts_exhausted"){patch.processing_status="discarded";patch.reel_status="discarded";patch.processing_failed_at=nowIso;patch.processing_token=null;patch.processing_error=`Automatically discarded after ${L.DEFAULTS.maxAttempts} failed attempts. The record and media are kept.`;}
+      if(result.status==="attempts_exhausted"){patch.processing_status="discarded";patch.reel_status="discarded";patch.processing_failed_at=nowIso;patch.processing_token=null;patch.processing_error=`Automatically discarded after 3 identical consecutive errors or 5 consecutive errors. The record and media are kept.`;}
       else if(result.status==="renderer_not_configured"){patch.processing_token=null;}
       await memeWrite(env,ctx,meme.id,leaseToken,patch);
     }catch(e:any){
@@ -976,7 +976,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const updated=await db(env,"account_meme_assignments",`?id=eq.${assignmentMatch[1]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(patch)});return json({assignment:updated?.[0]});
   }
   if (p === "/pipeline" && method === "GET") {
-    const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&select=id,processing_status,reel_status,processing_error,processing_attempts,classification,extracted_text,source_username,created_at,processing_next_retry_at,processing_locked_until,reel_render_locked_until&order=created_at.desc&limit=500`);
+    const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&select=id,processing_status,reel_status,processing_error,processing_attempts,processing_consecutive_errors,processing_same_error_count,classification,extracted_text,source_username,created_at,processing_next_retry_at,processing_locked_until,reel_render_locked_until&order=created_at.desc&limit=5000`);
+    const assignments: any[] = await db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=id,meme_id,approval_status,status&limit=5000`);
     const processing: Record<string, number> = {};
     const reel: Record<string, number> = {};
     for (const r of rows) {
@@ -984,27 +985,40 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       processing[ps] = (processing[ps] || 0) + 1;
       if (r.reel_status) reel[r.reel_status] = (reel[r.reel_status] || 0) + 1;
     }
-    const items = rows.filter((r) =>
-      r.processing_status !== "discarded" &&
-      (!["generated", "rejected", "media_unavailable"].includes(r.processing_status || "") ||
-        ["render_failed", "renderer_not_configured"].includes(r.reel_status || ""))
-    ).slice(0, 200);
     const nowMs = Date.now();
-    const total = rows.length;
-    const stages = [
-      { label: "Text read", count: rows.filter((r) => !!r.extracted_text).length, total },
-      { label: "Classified", count: rows.filter((r) => r.classification === "suitable" || r.classification === "rejected").length, total },
-      { label: "Rendered and ready to approve", count: rows.filter((r) => r.processing_status === "generated").length, total },
-    ];
-    const stepFor = (st: string) => ({ needs_ocr: "Reading text (OCR)", ocr_complete: "Classifying", ready_for_asset: "Rendering BRAT video" } as Record<string, string>)[st] || st;
     const isLocked = (r: any) => (r.processing_locked_until && new Date(r.processing_locked_until).getTime() > nowMs) || (r.reel_render_locked_until && new Date(r.reel_render_locked_until).getTime() > nowMs);
-    // Only count real work: a stale lease on a finished meme is not "running".
-    const running = rows
-      .filter((r) => isLocked(r) && (r.processing_status !== "generated" || r.reel_status === "rendering"))
-      .map((r) => ({ ...r, step: r.reel_status === "rendering" ? "Rendering video on GitHub" : stepFor(r.processing_status) }));
-    const queued = rows.filter((r) => ["needs_ocr", "ocr_complete", "ready_for_asset"].includes(r.processing_status) && !isLocked(r))
-      .filter((r) => !r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs)
-      .map((r) => ({ ...r, step: stepFor(r.processing_status) }));
+    const terminal = (r: any) => ["discarded","media_unavailable","low_confidence"].includes(r.processing_status || "") || r.classification === "low_confidence";
+    const items = rows.filter((r) => !terminal(r) && !["generated","rejected"].includes(r.processing_status || "") &&
+      !["generated","rejected","discarded","media_unavailable","low_confidence"].includes(r.reel_status || "")
+    ).slice(0, 200);
+    const total = rows.length;
+    const activeRows = rows.filter((r) => ["needs_ocr","ocr_complete","ready_for_asset"].includes(r.processing_status) && !terminal(r));
+    const runningRows = activeRows.filter(isLocked);
+    const readyQueueRows = activeRows.filter((r) => !isLocked(r) && (!r.processing_next_retry_at || new Date(r.processing_next_retry_at).getTime() <= nowMs));
+    const retryWaitRows = activeRows.filter((r) => !isLocked(r) && r.processing_next_retry_at && new Date(r.processing_next_retry_at).getTime() > nowMs);
+    const generatedIds = new Set(rows.filter((r) => r.processing_status === "generated").map((r) => r.id));
+    const pendingApproval = assignments.filter((a) => generatedIds.has(a.meme_id) && a.approval_status === "pending").length;
+    const flow = [
+      { key:"discovered", label:"Discovered", count:total, detail:"All source and manual meme records" },
+      { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length, detail:"Queued now or waiting for retry time" },
+      { key:"processing", label:"Processing", count:runningRows.length, detail:"OCR, classification or render work in progress" },
+      { key:"processed", label:"Processed", count:rows.filter((r) => ["generated","rejected"].includes(r.processing_status)).length, detail:"Generation completed or content classified out" },
+      { key:"approval", label:"Approval queue", count:pendingApproval, detail:"Generated items awaiting your decision" },
+      { key:"scheduled", label:"Scheduled", count:assignments.filter((a) => a.status === "scheduled").length, detail:"Approved destination assignments with a schedule" },
+      { key:"published", label:"Published", count:assignments.filter((a) => a.status === "published").length, detail:"Successfully published assignments" },
+      { key:"rejected", label:"Rejected", count:rows.filter((r) => r.processing_status === "rejected").length + assignments.filter((a) => a.approval_status === "rejected").length, detail:"Content or destination assignments rejected" },
+      { key:"discarded", label:"Discarded", count:rows.filter((r) => r.processing_status === "discarded").length, detail:"Terminal processing failures; retained for history" },
+      { key:"media_unavailable", label:"Media unavailable", count:rows.filter((r) => r.processing_status === "media_unavailable").length, detail:"Source media could not be retrieved" },
+      { key:"low_confidence", label:"Low confidence", count:rows.filter((r) => r.processing_status === "low_confidence" || r.classification === "low_confidence").length, detail:"No reliable text extraction; terminal manual-review outcome" },
+    ];
+    const stages = [
+      { label:"Text read", count:rows.filter((r) => !!r.extracted_text).length, total },
+      { label:"Classified", count:rows.filter((r) => ["suitable","rejected"].includes(r.classification)).length, total },
+      { label:"Rendered and ready to approve", count:rows.filter((r) => r.processing_status === "generated").length, total },
+    ];
+    const stepFor = (st: string) => ({ needs_ocr:"Reading text (OCR)", ocr_complete:"Classifying", ready_for_asset:"Rendering BRAT video" } as Record<string,string>)[st] || st;
+    const running = runningRows.map((r: any) => ({ ...r, step:r.reel_status === "rendering" ? "Rendering video on GitHub" : stepFor(r.processing_status) }));
+    const queued = readyQueueRows.map((r: any) => ({ ...r, step:stepFor(r.processing_status) }));
     const renderer = env.GITHUB_TOKEN && env.GITHUB_REPO ? "github_actions" : "not_configured";
     const explain = (r: any): string => {
       const err = r.processing_error ? ` Error: ${r.processing_error}` : "";
@@ -1012,18 +1026,16 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       if (r.reel_status === "rendering") return "Video is rendering on GitHub Actions. It retries if no result comes back in 30 minutes.";
       if (r.reel_status === "renderer_not_configured") return "The GitHub renderer is not configured. Set GITHUB_TOKEN and GITHUB_REPO on the Worker.";
       if (r.reel_status === "render_failed") return `Video render failed.${err} It retries automatically.`;
-      if (r.reel_status === "waiting_for_song") return "Photo is ready. The reel needs a track in Song Library.";
+      if (r.reel_status === "waiting_for_song") return "Photo is ready. The Reel needs a track in Song Library.";
       switch (r.processing_status) {
         case "needs_ocr": return locked ? "Reading text now." : (r.processing_attempts > 0 ? `Text reading failed.${err}` : "Waiting for the background job to read the text (runs every minute).");
         case "ocr_complete": return locked ? "Classifying now." : `Waiting for classification.${err}`;
         case "ready_for_asset": return locked ? "Starting the video render." : `Waiting to start the video render.${err}`;
-        case "low_confidence": return "No readable text was found. Needs manual review.";
-        case "processing_failed": return `Stopped after ${r.processing_attempts ?? 0} attempts.${err}`;
         default: return `Status: ${r.processing_status}.${err}`;
       }
     };
-    const itemsWithWhy = items.map((r: any) => ({ ...r, why: explain(r) }));
-    return json({ counts: { processing, reel }, renderer, items: itemsWithWhy, stages, running, queued });
+    const itemsWithWhy = items.map((r: any) => ({ ...r, why:explain(r) }));
+    return json({ counts:{processing,reel}, renderer, items:itemsWithWhy, stages, running, queued, flow, total, retry_wait:retryWaitRows.length });
   }
   const discardMatch=p.match(/^\/memes\/([0-9a-f-]+)\/discard$/);
   if(discardMatch&&method==="POST"){
@@ -1036,21 +1048,20 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     return json({meme:updated[0]});
   }
   if (p === "/pipeline/retry" && method === "POST") {
-    // Requeue every stuck item in one pass, choosing the correct stage for each row.
-    const reset = { processing_attempts: 0, processing_error: null, processing_next_retry_at: null, processing_locked_until: null, reel_render_locked_until: null, reel_render_next_retry_at: null };
-    const stuck = "(needs_ocr,ocr_complete,ready_for_asset,processing_failed)";
+    // Only active, non-terminal pipeline stages can be retried. Error streak counters are deliberately preserved.
+    const reset = { processing_attempts:0, processing_error:null, processing_next_retry_at:null, processing_locked_until:null, reel_render_locked_until:null, reel_render_next_retry_at:null };
     const groups = [
-      { filter: `processing_status=in.${stuck}&extracted_text=is.null`, status: "needs_ocr" },
-      { filter: `processing_status=in.${stuck}&extracted_text=not.is.null&classification=eq.suitable`, status: "ready_for_asset" },
-      { filter: `processing_status=in.${stuck}&extracted_text=not.is.null&classification=neq.suitable`, status: "ocr_complete" },
+      { filter:"processing_status=eq.needs_ocr&extracted_text=is.null", status:"needs_ocr" },
+      { filter:"processing_status=in.(ocr_complete,ready_for_asset)&extracted_text=not.is.null&classification=eq.suitable", status:"ready_for_asset" },
+      { filter:"processing_status=eq.ocr_complete&extracted_text=not.is.null&classification=neq.suitable", status:"ocr_complete" },
     ];
     let requeued = 0;
     for (const g of groups) {
-      const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{ method: "PATCH", body: JSON.stringify({ ...reset, processing_status: g.status }) });
+      const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{method:"PATCH",body:JSON.stringify({...reset,processing_status:g.status})});
       requeued += rows.length;
     }
-    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=neq.discarded&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: new Date().toISOString(), processing_error: null }) });
-    return json({ requeued, reel_requeued: reelRows.length });
+    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_locked_until:null,reel_render_next_retry_at:new Date().toISOString(),processing_error:null})});
+    return json({requeued,reel_requeued:reelRows.length});
   }
 
   if(p==="/help/search"&&method==="POST"){
@@ -1089,7 +1100,9 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const processMatch=p.match(/^\/memes\/([0-9a-f-]+)\/process$/);
   if(processMatch&&method==="POST"){
     const memeId=processMatch[1];const rows=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("Meme not found.",404);
-    const meme=rows[0];const next=meme.classification==="suitable"&&meme.extracted_text?"ready_for_asset":meme.extracted_text?"ocr_complete":"needs_ocr";
+    const meme=rows[0];
+    if (["discarded","media_unavailable","low_confidence","rejected"].includes(meme.processing_status) || meme.classification === "low_confidence") return fail("This item is terminal and cannot be retried.",409);
+    const next=meme.classification==="suitable"&&meme.extracted_text?"ready_for_asset":meme.extracted_text?"ocr_complete":"needs_ocr";
     const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_status:next,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null})});
     // Reprocessing produces a new image, so every destination goes back to the approval queue.
     await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}`,{method:"PATCH",body:JSON.stringify({approval_status:"pending",status:"pending",scheduled_at:null,publishing_locked_until:null,rejection_reason:"Reprocessed; approval reset."})});
