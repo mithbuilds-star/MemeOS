@@ -294,7 +294,7 @@ export function Scheduler() {
         if(slots.length<queue.length)throw new Error("Could not find enough future posting slots for every approved post.");
         const oldAuto=items.filter(i=>i.scheduled_at&&i.auto_scheduled&&i.approval_status==="approved");
         for(const item of oldAuto)await api("/assignments/"+item.id,{method:"PATCH",body:JSON.stringify({scheduled_at:null})});
-        if(queue.length){for(let start=0;start<queue.length;start+=10){const batch=queue.slice(start,start+10),batchSlots=slots.slice(start,start+10);await api("/scheduler/auto-fill",{method:"POST",body:JSON.stringify({assignment_ids:batch.map(i=>i.id),scheduled_at:batchSlots})});}}
+        if(queue.length){for(let start=0;start<queue.length;start+=5){const batch=queue.slice(start,start+5),batchSlots=slots.slice(start,start+5);await api("/scheduler/auto-fill",{method:"POST",body:JSON.stringify({assignment_ids:batch.map(i=>i.id),scheduled_at:batchSlots})});}}
         await api("/settings",{method:"PATCH",body:JSON.stringify({auto_post_enabled:true,posts_per_day:postsPerDay})});
         setAutoPost(true);await load();
       }else{
