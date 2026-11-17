@@ -275,13 +275,13 @@ export function Scheduler() {
   return <><PageHead eyebrow="PUBLISHING WORKFLOW" title="Scheduler" desc="Plan your approved memes and let BRATLOOP publish at the selected times."/>
     <div className="panel scheduler-panel">
       <div className="panel-head scheduler-topbar">
-        <div><h3>Approved content & upcoming schedule</h3><p>Auto-post assigns the newest approved posts to ascending time slots, then continues across the next 30 days.</p></div>
+        <div><h3>Approved content & upcoming schedule</h3><p>Auto-post assigns the newest approved posts to ascending time slots, then continues across future days until the approved queue is scheduled.</p></div>
         <div className="scheduler-auto-controls">
           <div className="posts-per-day"><span>POSTS / DAY</span><Select value={String(postsPerDay)} onChange={async(v:string)=>{const n=Number(v);setPostsPerDay(n);try{await api("/settings",{method:"PATCH",body:JSON.stringify({posts_per_day:n})})}catch(err:any){setError(err.message)}}} placeholder="Posts per day" defaultValue="3" defaultLabel="3× · Default" options={Array.from({length:10},(_,i)=>({value:String(i+1),label:(i+1)+"×"}))}/></div>
           <button className={"auto-post-toggle "+(autoPost?"enabled":"")} onClick={toggleAuto} disabled={autoBusy}><span className="auto-toggle-track"><i/></span><span>{autoBusy?"Applying…":autoPost?"Auto-post on":"Auto-post off"}</span></button>
         </div>
       </div>
-      <div className="scheduler-auto-note">{autoPost?"Auto-post is active. Turning it off pauses auto-filled posts without clearing their scheduled times.":"Turn on Auto-post to fill all approved posts in queue order, cycling through daily posting slots across a rolling 30-day schedule."}</div>
+      <div className="scheduler-auto-note">{autoPost?"Auto-post is active. Turning it off pauses auto-filled posts without clearing their scheduled times.":"Turn on Auto-post to fill all approved posts in queue order, cycling through daily posting slots across the rolling schedule until all approved posts have times."}</div>
       <div className="scheduler-count-row"><span>{items.filter(i=>i.scheduled_at).length} scheduled</span><span>{items.filter(i=>i.approval_status==="approved"&&!i.scheduled_at).length} ready to schedule</span></div>
       {missingCaptionIds.length>0&&<div className="scheduler-caption-backfill"><span>{missingCaptionIds.length} post(s) missing captions</span><button className="btn small secondary" onClick={backfillCaptions} disabled={captionBusy}>{captionBusy?<Loader2 className="spin" size={14}/>:<Sparkles size={14}/>} {captionBusy?"Generating…":"Generate missing captions"}</button></div>}
       {captionStatus&&<Notice kind="info">{captionStatus}</Notice>}
