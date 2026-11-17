@@ -211,15 +211,14 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // cutoff locally after fetching its maximum timeline; compatible custom actors
   // can also apply the same cutoff server-side.
   const backfillBefore=job.metadata?.phase==="backfill"&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
-  const incrementalAfter=job.metadata?.phase!=="backfill"&&job.metadata?.last_successful_scrape_at?Date.parse(job.metadata.last_successful_scrape_at):null;
-  // Enforce the cursor locally too: some actor runs return older timeline items
-  // even when onlyPostsNewerThan is supplied. Never import those duplicates.
+  // Coregent's postsNewerThan input has day-level precision. Applying the
+  // exact last_scraped_at timestamp again here incorrectly drops every post
+  // published earlier on that same day. For incremental discovery, trust the
+  // actor's newest-first page and deduplicate by Instagram post ID below.
+  // Only historical backfill needs a local timestamp cutoff.
   const batch=backfillBefore?items.filter((item:any)=>{
     const postedAt=normalizeApifyItem(item).postedAt;
     return !!postedAt&&Date.parse(postedAt)<backfillBefore;
-  }):incrementalAfter!==null?items.filter((item:any)=>{
-    const postedAt=normalizeApifyItem(item).postedAt;
-    return !!postedAt&&Date.parse(postedAt)>incrementalAfter;
   }):items;
   let inserted = 0, skipped = items.length-batch.length, failedMedia = 0;
   for (const item of batch) {
