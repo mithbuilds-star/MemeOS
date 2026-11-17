@@ -585,7 +585,7 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
   // Keep only settings that Coregent documents. Legacy actor input keys such as
   // directUrls, resultsType and onlyPostsNewerThan are intentionally discarded.
   const input:any={};
-  for(const key of ["mediaTypes","includeCarouselChildren","includeOwnerDetails","includeMediaUrls","maxConcurrency","maxRetries","debugMode","proxyConfiguration"]){
+  for(const key of ["mediaTypes","includeCarouselChildren","includeOwnerDetails","includeMediaUrls","maxConcurrency","maxRetries","debugMode"]){
     if(saved[key]!==undefined)input[key]=saved[key];
   }
   input.profiles=usernames.map((u:string)=>u.replace(/^@/,""));
