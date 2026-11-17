@@ -192,15 +192,11 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 /* Native content-type selects are used for reliable touch selection on mobile. */
 .library-filters select,.inline-form select{min-height:40px;min-width:145px;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel);color:var(--text);font:inherit;}
 
-/* Discovery runs: turn the wide table into compact stacked rows on phones. */
-@media(max-width:720px){
-  .discovery-runs-wrap{overflow:visible}
-  .discovery-runs-table{width:100%;table-layout:fixed;white-space:normal}
-  .discovery-runs-table thead{display:none}
-  .discovery-runs-table tbody{display:grid;gap:9px}
-  .discovery-runs-table tr{display:grid;grid-template-columns:minmax(0,1fr);border:1px solid var(--border);border-radius:11px;background:var(--panel2);overflow:hidden}
-  .discovery-runs-table td{display:grid;grid-template-columns:76px minmax(0,1fr);align-items:start;gap:9px;padding:10px 11px;border-bottom:1px solid var(--border);font-size:11px;white-space:normal;overflow-wrap:anywhere;min-width:0}
-  .discovery-runs-table td:last-child{border-bottom:0}
-  .discovery-runs-table td::before{content:attr(data-label);font-size:9px;font-weight:800;letter-spacing:.7px;color:var(--muted);text-transform:uppercase}
-  .discovery-runs-table td small{min-width:0;overflow-wrap:anywhere;word-break:break-word;line-height:1.45}
-}
+/* Keep Discovery runs as a table on phones without horizontal scrolling. */
+.discovery-runs-wrap{overflow-x:hidden;max-width:100%}
+.discovery-runs-table{width:100%;table-layout:fixed;white-space:normal}
+.discovery-runs-table th,.discovery-runs-table td{overflow-wrap:anywhere;word-break:break-word}
+.discovery-runs-table th:nth-child(1),.discovery-runs-table td:nth-child(1){width:44%}
+.discovery-runs-table th:nth-child(2),.discovery-runs-table td:nth-child(2){width:36%}
+.discovery-runs-table th:nth-child(3),.discovery-runs-table td:nth-child(3){width:20%}
+@media(max-width:640px){.discovery-runs-table th,.discovery-runs-table td{padding:8px 5px;font-size:9px}.discovery-runs-table td small{display:block;max-width:100%;font-size:8px;overflow-wrap:anywhere;word-break:break-word}}
