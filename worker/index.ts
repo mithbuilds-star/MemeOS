@@ -233,10 +233,14 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // Fewer than five recent posts means this source is likely quiet or its
   // previous cursor was advanced past older content. Start one bounded historical
   // pass ending at the oldest post returned by the incremental scrape.
-  if(job.metadata?.phase!=="backfill"&&items.length<SCRAPE_BACKFILL_THRESHOLD&&items.length>0){
-    const dated=items.map((item:any)=>normalizeApifyItem(item).postedAt).filter((v:any)=>!!v).map((v:string)=>new Date(v).getTime()).filter((v:number)=>Number.isFinite(v));
-    if(dated.length){
-      const oldest=new Date(Math.min(...dated)).toISOString();
+  const lastSuccessfulScrapeAt=job.metadata?.last_successful_scrape_at?Date.parse(job.metadata.last_successful_scrape_at):null;
+  const genuinelyNewPosts=lastSuccessfulScrapeAt?items.filter((item:any)=>{
+    const postedAt=normalizeApifyItem(item).postedAt;
+    return !!postedAt&&Date.parse(postedAt)>lastSuccessfulScrapeAt;
+  }):[];
+  if(job.metadata?.phase!=="backfill"&&lastSuccessfulScrapeAt!==null&&genuinelyNewPosts.length<SCRAPE_BACKFILL_THRESHOLD){
+    const dated=genuinelyNewPosts.map((item:any)=>normalizeApifyItem(item).postedAt).filter((v:any)=>!!v).map((v:string)=>new Date(v).getTime()).filter((v:number)=>Number.isFinite(v));
+    const oldest=dated.length?new Date(Math.min(...dated)).toISOString():new Date(lastSuccessfulScrapeAt).toISOString();
       const credentialRows=await db(env,"api_credentials",`?id=eq.${encodeURIComponent(String(job.metadata?.credential_id||""))}&${userFilter(ctx)}&select=*`);
       const credential=credentialRows?.[0];
       if(credential&&credential.enabled!==false){
@@ -249,7 +253,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
           const result:any=await response.json().catch(()=>({}));
           if(!response.ok)throw new Error(result.error?.message||`Apify backfill returned ${response.status}.`);
           await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:sourceNames,source_reference_account_id:job.metadata?.source_reference_account_id,scheduled:job.metadata?.scheduled,phase:"backfill",backfill_before:oldest,backfill_for_job_id:job.id}})});
-          LOG("discovery_backfill_started",{source_usernames:sourceNames,items_seen:items.length,backfill_before:oldest});
+          LOG("discovery_backfill_started",{source_usernames:sourceNames,newer_posts:genuinelyNewPosts.length,items_seen:items.length,backfill_before:oldest});
         }catch(e:any){
           LOG("discovery_backfill_start_failed",{source_usernames:sourceNames,error:String(e?.message||e).slice(0,300)});
         }
@@ -586,7 +590,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:credential.actor_id,source_usernames:[source.username],source_reference_account_id:source.id,scheduled}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:credential.actor_id,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,last_successful_scrape_at:source.last_scraped_at||null}})});
       if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
       return job[0];
     }catch(e:any){lastError=e?.message||lastError;}
