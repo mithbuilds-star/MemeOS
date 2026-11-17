@@ -244,7 +244,7 @@ export function Scheduler() {
     const booked=items.filter(i=>i.scheduled_at&&new Date(i.scheduled_at).toLocaleDateString("en-CA")===date);
     const used=new Set(booked.map(i=>{const d=new Date(i.scheduled_at);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}));
     const remaining=Math.max(0,postsPerDay-booked.length);
-    return ranked[day].slice().sort().filter(t=>new Date(date+"T"+t+":00").getTime()>now.getTime()+60000&&!used.has(t)).slice(0,remaining);
+    return ranked[day].filter(t=>new Date(date+"T"+t+":00").getTime()>now.getTime()+60000&&!used.has(t)).slice(0,remaining).sort();
   };
   const toggleAuto=async()=>{
     if(autoBusy)return;
