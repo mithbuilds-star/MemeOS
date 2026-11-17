@@ -1297,7 +1297,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     return json({status:"ok",automation:{paused:!!settings[0]?.global_paused,auto_process_enabled:settings[0]?.auto_process_enabled!==false,active_jobs:jobs.length},integrations:[{name:"Supabase",status:"Configured"},{name:"Apify",status:count("apify")?`${count("apify")} key(s) in API Manager`:"Needs setup"},{name:"Groq",status:count("groq")?`${count("groq")} key(s) in API Manager`:"Needs setup"},{name:"Meta",status:env.META_APP_ID&&env.META_APP_SECRET?"Credentials set":"Needs configuration"},{name:"Workers AI OCR",status:env.AI?"Server-side OCR available":"AI binding missing"},{name:"BRAT render service",status:renderStatus}]});
   }
   if(p==="/api-credentials"&&method==="GET"){
-    const rows=await db(env,"api_credentials",`?${userFilter(ctx)}&select=id,provider,label,key_hint,actor_id,actor_input,enabled,status,last_tested_at,last_used_at,created_at&order=created_at.desc`);
+    const rows=await db(env,"api_credentials",`?${userFilter(ctx)}&select=id,provider,label,key_hint,actor_id,actor_input,enabled,status,last_tested_at,last_used_at,created_at,usage_snapshot,usage_refreshed_at&order=created_at.desc`);
     return json({credentials:rows.map((row:any)=>({...row,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null)}))});
   }
   if(p==="/api-credentials"&&method==="POST"){
