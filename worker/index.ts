@@ -100,14 +100,16 @@ async function readBoundedBody(response:Response,maxBytes:number){
   const result=new Uint8Array(total);let offset=0;for(const chunk of chunks){result.set(chunk,offset);offset+=chunk.byteLength;}return result;
 }
 function normalizeApifyItem(item: any) {
-  const rawUsername = firstString(item,["ownerUsername","username","author.username","owner.username","user.username"]);
+  // Coregent returns nested owner/media objects and separates generic row type
+  // ("post") from the actual Instagram media type ("IMAGE", "REEL", etc.).
+  const rawUsername = firstString(item,["owner.username","ownerUsername","username","author.username","user.username","input"]);
   const username = rawUsername?rawUsername.replace(/^@/,"").toLowerCase():null;
   const permalink = firstString(item,["url","permalink","postUrl","post_url"]);
   const postId = firstString(item,["id","shortCode","shortcode","postId","pk"]) || permalink;
-  const image = firstString(item,["displayUrl","display_url","imageUrl","image_url","images.0.url","thumbnailUrl"]);
+  const image = firstString(item,["media.displayUrl","media.thumbnailUrl","displayUrl","display_url","imageUrl","image_url","thumbnailUrl","images.0.url"]);
   const caption = firstString(item,["caption","text","description","alt"]);
-  const type = firstString(item,["type","productType","mediaType"]) || "IMAGE";
-  const rawDate = item?.takenAt ?? item?.timestamp ?? item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
+  const type = firstString(item,["mediaType","productType","type"]) || "IMAGE";
+  const rawDate = item?.timestamp ?? item?.takenAt ?? item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
   let postedAt:string|null=null;
   if(typeof rawDate==="number"&&Number.isFinite(rawDate))postedAt=new Date(rawDate<1000000000000?rawDate*1000:rawDate).toISOString();
   else if(typeof rawDate==="string"&&rawDate.trim()){const parsed=new Date(rawDate);if(!Number.isNaN(parsed.getTime()))postedAt=parsed.toISOString();}
@@ -542,7 +544,7 @@ async function runWaitingReels(env:Env){
   }
 }
 
-const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
+const DEFAULT_APIFY_ACTOR = "coregent/instagram-posts-scraper";
 const SCRAPE_BATCH=25;
 const SCRAPE_BACKFILL_THRESHOLD=5;
 
@@ -552,9 +554,13 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
     if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
     try{
       const secret=await decryptSecret(env,credential);
-      const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));
-      // Incremental scan only: cap each profile run to limit paid Apify results.
-      const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,source.last_scraped_at||null);
+      // MemeOS now uses Coregent's posts/Reels actor for every Apify key.
+      // Do not honor legacy per-key actor_id values: they point to the old actor
+      // and its incompatible input/output schema.
+      const actorId=DEFAULT_APIFY_ACTOR;
+      const actor=encodeURIComponent(actorId.replace("/","~"));
+      // Fetch a bounded page of profile posts; incremental cursor avoids re-importing history.
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,source.last_scraped_at||null);
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
@@ -567,7 +573,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:credential.actor_id,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,last_successful_scrape_at:source.last_scraped_at||null}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,last_successful_scrape_at:source.last_scraped_at||null}})});
       if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
       return job[0];
     }catch(e:any){lastError=e?.message||lastError;}
@@ -575,42 +581,27 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
   throw new Error(`@${source.username}: ${lastError}`);
 }
 function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null,olderThan?:string|null){
-  const input=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
-  const replace=(value:any):any=>{
-    if(typeof value==="string"){if(value==="{{usernames}}")return usernames;if(value==="{{profile_urls}}")return usernames.map(u=>`https://www.instagram.com/${u.replace(/^@/,"")}/`);if(value==="{{start_urls}}")return usernames.map(u=>({url:`https://www.instagram.com/${u.replace(/^@/,"")}/`}));return value;}
-    if(Array.isArray(value))return value.map(replace);
-    if(value&&typeof value==="object"){const out:any={};for(const [k,v] of Object.entries(value))out[k]=replace(v);return out;}
-    return value;
-  };
-  const result=replace(input);
-  // The recommended Apify-maintained Instagram Scraper expects profile URLs in directUrls.
-  // Convert the older MemeOS default `usernames` input so existing saved keys keep working.
-  if(actorId===DEFAULT_APIFY_ACTOR){
-    if(!Array.isArray(result.directUrls)){
-      const source=Array.isArray(result.usernames)?result.usernames:usernames;
-      result.directUrls=source.map((u:string)=>`https://www.instagram.com/${String(u).replace(/^@/,"")}/`);
-    }
-    delete result.usernames;
-  }else if(!("usernames" in result)&&!("directUrls" in result)&&!("startUrls" in result))result.usernames=usernames;
-  result.resultsLimit=limit;
+  const saved=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
+  // Keep only settings that Coregent documents. Legacy actor input keys such as
+  // directUrls, resultsType and onlyPostsNewerThan are intentionally discarded.
+  const input:any={};
+  for(const key of ["mediaTypes","includeCarouselChildren","includeOwnerDetails","includeMediaUrls","maxConcurrency","maxRetries","debugMode","proxyConfiguration"]){
+    if(saved[key]!==undefined)input[key]=saved[key];
+  }
+  input.profiles=usernames.map((u:string)=>u.replace(/^@/,""));
+  input.resultsLimit=Math.max(1,Math.min(100,limit));
   if(newerThan){
-    // Apify accepts UTC timestamps ending in Z, but Postgres/Supabase may
-    // return timezone offsets such as +00:00, which its input validator rejects.
     const parsed=new Date(newerThan);
-    if(!Number.isNaN(parsed.getTime()))result.onlyPostsNewerThan=parsed.toISOString().replace(/\.\d{3}Z$/,"Z");
+    if(!Number.isNaN(parsed.getTime()))input.postsNewerThan=parsed.toISOString().slice(0,10);
   }
   if(olderThan){
     const parsed=new Date(olderThan);
     if(!Number.isNaN(parsed.getTime())){
-      delete result.onlyPostsNewerThan;
-      // The official apify/instagram-scraper actor exposes onlyPostsNewerThan,
-      // not onlyPostsOlderThan. For it, fetch the maximum timeline and enforce
-      // the historical cutoff against each returned post during import.
-      if(actorId!==DEFAULT_APIFY_ACTOR)result.onlyPostsOlderThan=parsed.toISOString().replace(/\.\d{3}Z$/,"Z");
-      else delete result.onlyPostsOlderThan;
+      delete input.postsNewerThan;
+      input.postsOlderThan=parsed.toISOString().slice(0,10);
     }
   }
-  return result;
+  return input;
 }
 
 async function syncMetaAnalyticsForHistory(env:Env,history:any){
