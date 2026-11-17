@@ -265,7 +265,7 @@ main().catch(async (e) => {
       const retryAt = new Date(Date.now() + Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, consecutive - 1)))).toISOString();
       await patchMeme({
         reel_status: terminal ? 'discarded' : 'render_failed',
-        processing_status: terminal ? 'discarded' : 'generated',
+        processing_status: terminal ? 'discarded' : undefined,
         processing_error: error,
         processing_consecutive_errors: consecutive,
         processing_same_error_count: same,
