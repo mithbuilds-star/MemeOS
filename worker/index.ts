@@ -1060,7 +1060,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const groups = [
       { filter:"processing_status=in.(needs_ocr,failed,processing_failed)&classification=neq.low_confidence&extracted_text=is.null", status:"needs_ocr" },
       { filter:"processing_status=in.(ocr_complete,ready_for_asset,failed,processing_failed)&extracted_text=not.is.null&classification=eq.suitable", status:"ready_for_asset" },
-      { filter:"processing_status=in.(ocr_complete,failed,processing_failed)&extracted_text=not.is.null&classification=neq.suitable&classification=neq.low_confidence", status:"ocr_complete" },
+      { filter:"processing_status=in.(ocr_complete,failed,processing_failed)&extracted_text=not.is.null&classification=neq.suitable", status:"ocr_complete" },
     ];
     let requeued = 0;
     for (const g of groups) {
@@ -1110,7 +1110,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const meme=rows[0];
     if (["discarded","media_unavailable","low_confidence"].includes(meme.processing_status) || meme.classification === "low_confidence") return fail("This item is terminal and cannot be retried.",409);
     const next=meme.classification==="suitable"&&meme.extracted_text?"ready_for_asset":meme.extracted_text?"ocr_complete":"needs_ocr";
-    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_status:next,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null})});
+    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({processing_status:next,processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_token:null,reel_render_locked_until:null,reel_render_next_retry_at:null,processing_error:null})});
     // Reprocessing produces a new image, so every destination goes back to the approval queue.
     await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}`,{method:"PATCH",body:JSON.stringify({approval_status:"pending",status:"pending",scheduled_at:null,publishing_locked_until:null,rejection_reason:"Reprocessed; approval reset."})});
     return json({queued:true,processing_status:updated?.[0]?.processing_status||next});
