@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import {
   Activity, BarChart3, CalendarDays, CheckCheck, ChevronDown, CircleHelp, Instagram, BookOpen,
   Clapperboard, Command, Compass, Database, FileImage, LayoutDashboard,
@@ -7,7 +7,7 @@ import {
   Workflow, X
 } from "lucide-react";
 import { initializeSupabase, supabase } from "./lib/supabase";
-import { Overview, Accounts, InstagramDashboard, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline, Help } from "./pages";
+import { Overview, Accounts, InstagramDashboard, Discovery, Queue, Library, Creator, Scheduler, Publishing, Analytics, Health, SettingsPage, SongLibrary, Login, Pipeline, PipelineStage, Help } from "./pages";
 
 const nav = [
   ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users], ["Instagram", "/instagram", Instagram],
@@ -100,9 +100,11 @@ export default function App() {
         <Route path="/discovery" element={<Discovery/>}/><Route path="/queue" element={<Queue/>}/>
         <Route path="/library" element={<Library/>}/><Route path="/songs" element={<SongLibrary/>}/><Route path="/creator" element={<Creator/>}/>
         <Route path="/scheduler" element={<Scheduler/>}/><Route path="/publishing" element={<Publishing/>}/>
-        <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/><Route path="/pipeline" element={<Pipeline/>}/>
+        <Route path="/analytics" element={<Analytics/>}/><Route path="/health" element={<Health/>}/><Route path="/pipeline" element={<Pipeline/>}/><Route path="/pipeline/:stage" element={<PipelineStageRoute/>}/>
         <Route path="/settings" element={<SettingsPage/>}/><Route path="/help" element={<Help/>}/><Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes></div>
     </main>
   </div>;
 }
+
+function PipelineStageRoute() { const { stage = "" } = useParams(); return <PipelineStage stage={stage} />; }
