@@ -615,7 +615,7 @@ async function runScheduledDiscovery(env:Env){
   const owners=[...new Set(active.map((a:any)=>a.owner_id))].slice(0,1);const now=Date.now();
   for(const ownerId of owners){
     const ctx:Ctx={userId:ownerId,token:""};
-    const settingsRows=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,discovery_interval_minutes,last_discovery_started_at`);
+    const settingsRows=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,discovery_interval_minutes,last_discovery_started_at,last_usage_refresh_date`);
     const settings=settingsRows[0]||{};
     const indiaDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
     if(settings.last_usage_refresh_date!==indiaDate){
