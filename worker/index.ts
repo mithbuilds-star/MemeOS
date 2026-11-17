@@ -843,7 +843,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   if(memeEdit&&method==="PATCH"){
     const memeId=memeEdit[1];if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
     const text=String(body.extracted_text||"").trim();if(!text||text.length>3000)return fail("Meme text must be between 1 and 3000 characters.");
-    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({extracted_text:text,classification:"needs_review",classification_reason:"Text edited by user. Reclassification and asset regeneration queued.",processing_status:"ocr_complete",processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null,reel_status:"not_started",reel_asset_path:null,reel_asset_url:null,reel_song_id:null})});
+    const updated=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({extracted_text:text,social_caption:null,classification:"needs_review",classification_reason:"Text edited by user. Reclassification and asset regeneration queued.",processing_status:"ocr_complete",processing_attempts:0,processing_next_retry_at:null,processing_locked_until:null,processing_error:null,reel_status:"not_started",reel_asset_path:null,reel_asset_url:null,reel_song_id:null})});
     const assignments=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}&select=id`);for(const assignment of assignments)await db(env,"account_meme_assignments",`?id=eq.${assignment.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({approval_status:"pending",status:"pending",scheduled_at:null,publishing_locked_until:null,rejection_reason:"Content text changed; approval reset."})});
     return json({meme:updated?.[0],queued:true,approvals_reset:assignments.length});
   }
@@ -893,13 +893,13 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const memeReady=await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=processing_status,asset_url,reel_status,reel_asset_url,reel_song_id,output_format,social_caption,extracted_text,original_caption`);const ready=memeReady[0];
     // auto: about 30% of approved memes become Reels (when a Reel with a song exists), the rest are photo posts.
     if(publishFormat==="auto"){publishFormat=ready?.output_format==="reel"?"reel":"photo";}
+    if(decision==="approved"&&publishFormat==="photo"&&(ready?.processing_status!=="generated"||!ready?.asset_url))return fail("The BRAT final-frame photo asset is not ready yet.",409);
+    if(decision==="approved"&&publishFormat==="reel"&&(ready?.reel_status!=="generated"||!ready?.reel_asset_url||!ready?.reel_song_id))return fail("The Reel and selected song are not ready yet.",409);
     if(decision==="approved"&&!String(ready?.social_caption||"").trim()){
       const caption=await generateCaptionWithGroq(env,ctx,ready||{});
       await db(env,"memes","?id=eq."+memeId+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({social_caption:caption})});
       ready.social_caption=caption;
     }
-    if(decision==="approved"&&publishFormat==="photo"&&(ready?.processing_status!=="generated"||!ready?.asset_url))return fail("The BRAT final-frame photo asset is not ready yet.",409);
-    if(decision==="approved"&&publishFormat==="reel"&&(ready?.reel_status!=="generated"||!ready?.reel_asset_url||!ready?.reel_song_id))return fail("The Reel and selected song are not ready yet.",409);
     if(body.account_id){
       if(!await owned(env,"instagram_accounts",String(body.account_id),ctx))return fail("Destination account not found.",404);
       const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}&destination_account_id=eq.${body.account_id}&select=id`);
