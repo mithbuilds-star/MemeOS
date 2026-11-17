@@ -193,23 +193,24 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const runId=job.provider_run_id;
   if(!runId)throw new Error("Discovery job has no Apify run ID.");
-  // A profile page capped at 25 posts should never occupy a Worker job forever.
-  // Backfill can take longer because the actor pages past newer posts to reach
-  // postsOlderThan, but both phases have a hard upper bound.
-  const isBackfill=job.metadata?.phase==="backfill";
-  const maxAgeMs=isBackfill?20*60*1000:12*60*1000;
-  const ageMs=job.created_at?Date.now()-Date.parse(job.created_at):0;
-  if(Number.isFinite(ageMs)&&ageMs>maxAgeMs){
-    const reason=`Apify ${isBackfill?"historical backfill":"incremental discovery"} exceeded its ${Math.round(maxAgeMs/60000)} minute limit; the run was aborted to prevent a stuck job and further usage.`;
-    try{await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}/abort`,job,{method:"POST"});}
-    catch(error:any){console.warn("Could not abort stale Apify run",runId,String(error?.message||error));}
-    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:reason,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
-    throw new Error(reason);
-  }
   const statusRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
   const statusData:any=await statusRes.json().catch(()=>({}));
   const run=statusData.data||{};
-  if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status))return {done:false,status:run.status};
+  if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status)){
+    // A profile page capped at 25 posts should never occupy a Worker job forever.
+    // Check the actual Apify state first so a completed-but-unpolled run is still imported.
+    const isBackfill=job.metadata?.phase==="backfill";
+    const maxAgeMs=isBackfill?20*60*1000:12*60*1000;
+    const ageMs=job.created_at?Date.now()-Date.parse(job.created_at):0;
+    if(Number.isFinite(ageMs)&&ageMs>maxAgeMs){
+      const reason=`Apify ${isBackfill?"historical backfill":"incremental discovery"} exceeded its ${Math.round(maxAgeMs/60000)} minute limit; the run was aborted to prevent a stuck job and further usage.`;
+      try{await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}/abort`,job,{method:"POST"});}
+      catch(error:any){console.warn("Could not abort stale Apify run",runId,String(error?.message||error));}
+      await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:reason,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
+      throw new Error(reason);
+    }
+    return {done:false,status:run.status};
+  }
   if(run.status!=="SUCCEEDED"){
     await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:`Apify run finished with status ${run.status}.`,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
     throw new Error(`Apify run finished with status ${run.status}.`);
