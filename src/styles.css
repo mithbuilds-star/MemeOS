@@ -187,3 +187,7 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 
 /* API key live usage details */
 .api-key-usage{display:flex;flex-wrap:wrap;align-items:center;gap:5px 14px;margin-top:9px;padding:9px 11px;border:1px solid var(--border);border-radius:9px;background:var(--panel2);font-size:10px}.api-key-usage>b{flex-basis:100%;font-size:10px}.api-key-usage>span{color:var(--text)}.api-key-usage>small{flex-basis:100%;color:var(--muted);font-size:9px}.api-usage-hint,.api-usage-error{display:block;margin-top:7px;font-size:10px}.api-usage-hint{color:var(--muted)}.api-usage-error{color:var(--danger)}.api-usage-ok{color:var(--success)}.api-key-actions .btn{display:inline-flex;align-items:center;gap:5px}.api-key-actions .spin{animation:api-spin .8s linear infinite}@keyframes api-spin{to{transform:rotate(360deg)}}
+
+
+/* Native content-type selects are used for reliable touch selection on mobile. */
+.library-filters select,.inline-form select{min-height:40px;min-width:145px;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel);color:var(--text);font:inherit;}
