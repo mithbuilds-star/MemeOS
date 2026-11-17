@@ -471,17 +471,17 @@ async function syncMetaAnalyticsForHistory(env:Env,history:any){
   if(!item?.meta_media_id||!account?.meta_access_token_enc||!account?.meta_access_token_iv)throw new Error("Published media or connected Meta token is unavailable.");
   const token=await decryptSecret(env,{encrypted_secret:account.meta_access_token_enc,encryption_iv:account.meta_access_token_iv});
   const version=env.META_GRAPH_VERSION||"v27.0";
-  const media=await graphRequest(version,`${encodeURIComponent(item.meta_media_id)}?fields=id,like_count,comments_count,media_type,media_product_type,timestamp,permalink&access_token=${encodeURIComponent(token)}`);
+  const media=await graphRequest(version,`${encodeURIComponent(item.meta_media_id)}?fields=id,like_count,comments_count,media_type,media_product_type,timestamp,permalink&access_token=${encodeURIComponent(token)}`,undefined,account.meta_api_host||"graph.instagram.com");
   const today=new Date().toISOString().slice(0,10);
   const metrics:any={likes:media.like_count,comments:media.comments_count};
   const insightMetrics=["reach","views","saved","shares","total_interactions"];
   try{
-    const all=await graphRequest(version,`${encodeURIComponent(item.meta_media_id)}/insights?metric=${insightMetrics.join(",")}&access_token=${encodeURIComponent(token)}`);
+    const all=await graphRequest(version,`${encodeURIComponent(item.meta_media_id)}/insights?metric=${insightMetrics.join(",")}&access_token=${encodeURIComponent(token)}`,undefined,account.meta_api_host||"graph.instagram.com");
     for(const entry of all.data||[]){const key=entry.name==="saved"?"saves":entry.name;const value=entry.values?.[0]?.value??entry.total_value?.value;if(typeof value==="number")metrics[key]=value;}
   }catch{
     // Metric support varies by media type and account. Retry individually so one
     // unsupported metric does not suppress other values that Meta does provide.
-    for(const metric of insightMetrics){try{const one=await graphRequest(version,`${encodeURIComponent(item.meta_media_id)}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`);const entry=(one.data||[])[0];const value=entry?.values?.[0]?.value??entry?.total_value?.value;if(typeof value==="number")metrics[metric==="saved"?"saves":metric]=value;}catch{}}
+    for(const metric of insightMetrics){try{const one=await graphRequest(version,`${encodeURIComponent(item.meta_media_id)}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`,undefined,account.meta_api_host||"graph.instagram.com");const entry=(one.data||[])[0];const value=entry?.values?.[0]?.value??entry?.total_value?.value;if(typeof value==="number")metrics[metric==="saved"?"saves":metric]=value;}catch{}}
   }
   for(const [metric_name,metric_value] of Object.entries(metrics)){if(typeof metric_value!=="number"||!Number.isFinite(metric_value))continue;
     const memeFilter=item.meme_id?`meme_id=eq.${item.meme_id}`:"meme_id=is.null";
@@ -525,47 +525,76 @@ async function runScheduledDiscovery(env:Env){
   }
 }
 
-// Instagram Login callback: validates single-use state, exchanges the code, stores the encrypted long-lived token.
-async function metaCallback(req: Request, env: Env, url: URL): Promise<Response> {
-  const back = (qs: string) => Response.redirect(`${url.origin}/accounts?${qs}`, 302);
-  const err = url.searchParams.get("error_description") || url.searchParams.get("error");
-  if (err) return back(`ig_error=${encodeURIComponent("Instagram did not grant access: " + err)}`);
-  const code = (url.searchParams.get("code") || "").replace(/#_$/, "");
-  const state = url.searchParams.get("state") || "";
-  if (!code || !state) return back(`ig_error=${encodeURIComponent("The Instagram response was incomplete. Try connecting again.")}`);
-  // Single use: deleting the row is the check. Expired or unknown states are rejected.
-  const rows: any[] = await db(env, "meta_oauth_states", `?state=eq.${encodeURIComponent(state)}&select=*`, { method: "DELETE" });
-  const st = rows?.[0];
-  if (!st || new Date(st.expires_at).getTime() < Date.now()) return back(`ig_error=${encodeURIComponent("This connection link expired or was already used. Click Connect again.")}`);
-  try {
-    const form = new URLSearchParams({ client_id: env.META_APP_ID || "", client_secret: env.META_APP_SECRET || "", grant_type: "authorization_code", redirect_uri: env.META_REDIRECT_URI || "", code });
-    const shortRes = await fetch("https://api.instagram.com/oauth/access_token", { method: "POST", body: form });
-    const short: any = await shortRes.json().catch(() => ({}));
-    if (!shortRes.ok || !short.access_token) throw new Error(short.error_message || short.error?.message || "The code was rejected (it may have expired).");
-    const longRes = await fetch(`https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${encodeURIComponent(env.META_APP_SECRET || "")}&access_token=${encodeURIComponent(short.access_token)}`);
-    const long: any = await longRes.json().catch(() => ({}));
-    if (!longRes.ok || !long.access_token) throw new Error(long.error?.message || "Could not get a long-lived token.");
-    const ver = env.META_GRAPH_VERSION || "v27.0";
-    const meRes = await fetch(`https://graph.instagram.com/${ver}/me?fields=user_id,username,account_type,profile_picture_url&access_token=${encodeURIComponent(long.access_token)}`);
-    const me: any = await meRes.json().catch(() => ({}));
-    if (!meRes.ok || !me.username) throw new Error(me.error?.message || "Could not read the Instagram account.");
-    const enc = await encryptSecret(env, long.access_token);
-    const expiresAt = new Date(Date.now() + Number(long.expires_in || 5184000) * 1000).toISOString();
-    await db(env, "instagram_accounts", `?id=eq.${st.destination_account_id}&owner_id=eq.${st.owner_id}`, { method: "PATCH", body: JSON.stringify({
-      username: me.username, meta_user_id: String(me.user_id || short.user_id || ""), profile_picture_url: me.profile_picture_url || null,
-      meta_access_token_enc: enc.encrypted_secret, meta_access_token_iv: enc.encryption_iv, meta_token_expires_at: expiresAt,
-      meta_token_refreshed_at: new Date().toISOString(), meta_token_refresh_error: null, connection_status: "connected" }) });
-    return back("ig_connected=1");
-  } catch (e: any) {
-    await db(env, "instagram_accounts", `?id=eq.${st.destination_account_id}&owner_id=eq.${st.owner_id}`, { method: "PATCH", body: JSON.stringify({ connection_status: "error", meta_token_refresh_error: String(e?.message || e).slice(0, 300) }) }).catch(() => {});
-    return back(`ig_error=${encodeURIComponent(String(e?.message || e))}`);
+// Validates a Meta System User Access Token and binds its Instagram asset to one destination.
+async function connectMetaSystemUserToken(env: Env, ctx: Ctx, accountId: string, accessToken: string, suppliedInstagramId?: string) {
+  if (!env.META_APP_ID || !env.META_APP_SECRET) throw new Error("META_APP_ID and META_APP_SECRET must be configured as Worker variables/secrets.");
+  if (accessToken.length < 40 || accessToken.length > 5000) throw new Error("That does not look like a valid Meta access token.");
+  const version = env.META_GRAPH_VERSION || "v27.0";
+  const appAccessToken = env.META_APP_ID + "|" + env.META_APP_SECRET;
+  const debugUrl = new URL("https://graph.facebook.com/" + version + "/debug_token");
+  debugUrl.searchParams.set("input_token", accessToken);
+  debugUrl.searchParams.set("access_token", appAccessToken);
+  const debugRes = await fetch(debugUrl.toString());
+  const debugBody: any = await debugRes.json().catch(() => ({}));
+  const debug = debugBody.data || {};
+  if (!debugRes.ok || !debug.is_valid) throw new Error(debugBody.error?.message || "Meta says this token is invalid or revoked.");
+  if (debug.app_id && String(debug.app_id) !== String(env.META_APP_ID)) throw new Error("This token belongs to a different Meta app. Generate it from the app configured for BRATLOOP.");
+  const scopes: string[] = Array.isArray(debug.scopes) ? debug.scopes : [];
+  const hasBasic = scopes.includes("instagram_basic");
+  const hasPublish = scopes.includes("instagram_content_publish");
+  if (!hasBasic || !hasPublish) throw new Error("This token is missing Instagram permissions. Enable instagram_basic and instagram_content_publish in your Meta configuration, then generate a new token.");
+  const candidates = new Set<string>();
+  for (const grant of (Array.isArray(debug.granular_scopes) ? debug.granular_scopes : [])) {
+    if (String(grant.scope || "").startsWith("instagram_")) {
+      for (const id of (Array.isArray(grant.target_ids) ? grant.target_ids : [])) candidates.add(String(id));
+    }
   }
+  if (suppliedInstagramId && /^\d{5,30}$/.test(suppliedInstagramId)) candidates.add(suppliedInstagramId);
+  if (!candidates.size) throw new Error("Meta validated the token but did not expose an Instagram asset ID. Enter the Instagram Account ID from your Meta Business portfolio and try again.");
+  const accountRows = await db(env, "instagram_accounts", "?id=eq." + encodeURIComponent(accountId) + "&" + userFilter(ctx) + "&select=id,username");
+  const destination = accountRows?.[0];
+  if (!destination) throw new Error("Destination account not found.");
+  let selected: any = null;
+  for (const candidate of candidates) {
+    const profileUrl = new URL("https://graph.facebook.com/" + version + "/" + encodeURIComponent(candidate));
+    profileUrl.searchParams.set("fields", "id,username,account_type,profile_picture_url");
+    profileUrl.searchParams.set("access_token", accessToken);
+    const profileRes = await fetch(profileUrl.toString());
+    const profile: any = await profileRes.json().catch(() => ({}));
+    if (profileRes.ok && profile.username && String(profile.username).toLowerCase() === String(destination.username).toLowerCase()) {
+      selected = profile;
+      break;
+    }
+  }
+  if (!selected) throw new Error("The token is valid, but none of its Instagram assets matched @" + destination.username + ". Check that this Instagram account is assigned to the System User and that the destination username is correct.");
+  const encrypted = await encryptSecret(env, accessToken);
+  const expiresAt = Number(debug.expires_at || 0) > 0 ? new Date(Number(debug.expires_at) * 1000).toISOString() : null;
+  const tokenType = expiresAt ? "facebook_user" : "system_user";
+  const updated = await db(env, "instagram_accounts", "?id=eq." + encodeURIComponent(accountId) + "&" + userFilter(ctx), {
+    method: "PATCH",
+    body: JSON.stringify({
+      instagram_account_id: String(selected.id),
+      meta_user_id: String(selected.id),
+      username: String(selected.username).toLowerCase(),
+      account_type: selected.account_type || "BUSINESS",
+      profile_picture_url: selected.profile_picture_url || null,
+      meta_access_token_enc: encrypted.encrypted_secret,
+      meta_access_token_iv: encrypted.encryption_iv,
+      meta_token_expires_at: expiresAt,
+      meta_token_refreshed_at: new Date().toISOString(),
+      meta_token_refresh_error: null,
+      meta_token_type: tokenType,
+      meta_api_host: "graph.facebook.com",
+      connection_status: "connected"
+    })
+  });
+  return { ok: true, account: updated?.[0] || { id: accountId, username: selected.username }, token_type: tokenType };
 }
 
 // Refreshes long-lived tokens that are close to expiry. Only refreshes tokens that are still valid.
 async function refreshInstagramTokens(env: Env) {
   const soon = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
-  const rows: any[] = await db(env, "instagram_accounts", `?meta_access_token_enc=not.is.null&meta_token_expires_at=lte.${encodeURIComponent(soon)}&select=*&limit=20`);
+  const rows: any[] = await db(env, "instagram_accounts", `?meta_access_token_enc=not.is.null&meta_api_host=eq.graph.instagram.com&meta_token_expires_at=lte.${encodeURIComponent(soon)}&select=*&limit=20`);
   for (const acc of rows) {
     try {
       const token = await decryptSecret(env, { encrypted_secret: acc.meta_access_token_enc, encryption_iv: acc.meta_access_token_iv });
@@ -583,8 +612,8 @@ async function refreshInstagramTokens(env: Env) {
 }
 
 // Instagram Login Graph calls. Tokens are only ever sent server-side.
-async function graphRequest(version: string, pathWithQuery: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(`https://graph.instagram.com/${version}/${pathWithQuery}`, init);
+async function graphRequest(version: string, pathWithQuery: string, init?: RequestInit, host = "graph.instagram.com"): Promise<any> {
+  const res = await fetch(`https://${host}/${version}/${pathWithQuery}`, init);
   const data: any = await res.json().catch(() => ({}));
   if (!res.ok || data.error) throw new Error(data.error?.message || `Meta Graph request failed (${res.status}).`);
   return data;
@@ -600,13 +629,13 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     db(env, "publishing_history", "", { method: "POST", body: JSON.stringify({ owner_id: item.owner_id, ...row }) }).catch(() => {});
   let assignmentRow: any = null;
   try {
-    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url),instagram_accounts(id,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at)`);
+    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url),instagram_accounts(id,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at,meta_api_host,meta_token_type)`);
     assignmentRow = rows?.[0];
     if (!assignmentRow) throw new Error("Scheduled assignment no longer exists.");
     const account = assignmentRow.instagram_accounts;
     const meme = assignmentRow.memes;
     if (!account?.meta_access_token_enc || !account?.meta_user_id) throw new Error("This account is not connected to Instagram. Reconnect it in Accounts.");
-    if (!account.meta_token_expires_at || new Date(account.meta_token_expires_at).getTime() < Date.now()) throw new Error("The Instagram token has expired. Reconnect this account.");
+    if (account.meta_token_expires_at && new Date(account.meta_token_expires_at).getTime() < Date.now()) throw new Error("The Meta token has expired. Reconnect this account.");
 
     // Idempotency: never publish the same meme to the same account twice.
     const done: any[] = await db(env, "publishing_history", `?owner_id=eq.${encodeURIComponent(item.owner_id)}&meme_id=eq.${meme.id}&destination_account_id=eq.${account.id}&status=eq.published&select=id,meta_media_id,permalink&limit=1`);
@@ -625,12 +654,12 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     form.set("access_token", token);
     if (isReel) { form.set("media_type", "REELS"); form.set("video_url", mediaUrl); }
     else form.set("image_url", mediaUrl);
-    const container = await graphRequest(version, `${userId}/media`, { method: "POST", body: form });
+    const container = await graphRequest(version, `${userId}/media`, { method: "POST", body: form }, account.meta_api_host || "graph.instagram.com");
     const creationId = encodeURIComponent(container.id);
 
     let statusCode = "IN_PROGRESS";
     for (let attempt = 0; attempt < 24; attempt++) {
-      const s = await graphRequest(version, `${creationId}?fields=status_code&access_token=${encodeURIComponent(token)}`);
+      const s = await graphRequest(version, `${creationId}?fields=status_code&access_token=${encodeURIComponent(token)}`, undefined, account.meta_api_host || "graph.instagram.com");
       statusCode = s.status_code || "IN_PROGRESS";
       if (statusCode === "FINISHED") break;
       if (statusCode === "ERROR" || statusCode === "EXPIRED") throw new Error(`Instagram rejected the media (${statusCode}).`);
@@ -641,10 +670,10 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     const pub = new URLSearchParams();
     pub.set("access_token", token);
     pub.set("creation_id", container.id);
-    const published = await graphRequest(version, `${userId}/media_publish`, { method: "POST", body: pub });
+    const published = await graphRequest(version, `${userId}/media_publish`, { method: "POST", body: pub }, account.meta_api_host || "graph.instagram.com");
 
     let permalink: string | null = null;
-    try { const m = await graphRequest(version, `${encodeURIComponent(published.id)}?fields=permalink&access_token=${encodeURIComponent(token)}`); permalink = m.permalink || null; } catch {}
+    try { const m = await graphRequest(version, `${encodeURIComponent(published.id)}?fields=permalink&access_token=${encodeURIComponent(token)}`, undefined, account.meta_api_host || "graph.instagram.com"); permalink = m.permalink || null; } catch {}
     const now = new Date().toISOString();
     await recordHistory({ meme_id: meme.id, destination_account_id: account.id, meta_media_id: published.id, permalink, status: "published", published_at: now });
     await setAssignment({ status: "published", publishing_locked_until: null, rejection_reason: null });
@@ -671,7 +700,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     ]);
     return json({ accounts:a.length, memes:m.length, pending:q.length, published:pub.length, scheduled:sched.length });
   }
-  if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,owner_id,instagram_account_id,username,display_name,account_type,connection_status,token_expires_at,discovery_enabled,created_at,updated_at,meta_user_id,meta_token_expires_at,meta_token_refreshed_at,meta_token_refresh_error,profile_picture_url&order=created_at.desc`) });
+  if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,owner_id,instagram_account_id,username,display_name,account_type,connection_status,token_expires_at,discovery_enabled,created_at,updated_at,meta_user_id,meta_token_expires_at,meta_token_refreshed_at,meta_token_refresh_error,profile_picture_url,meta_token_type,meta_api_host&order=created_at.desc`) });
   if (p === "/accounts" && method === "POST") {
     const username = String(body.username || "").trim().replace(/^@/,"").toLowerCase();
     if (!/^[a-z0-9._]{1,30}$/.test(username)) return fail("Enter a valid Instagram username.");
@@ -680,12 +709,14 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   }
   const metaConnect=p.match(/^\/accounts\/([0-9a-f-]+)\/meta-connect$/);
   if(metaConnect&&method==="POST"){
-    if(!env.META_APP_ID||!env.META_REDIRECT_URI)return fail("Meta app credentials and callback URL are not configured in the Worker.",503);
+    if(!env.META_APP_ID||!env.META_APP_SECRET)return fail("Set META_APP_ID and META_APP_SECRET in the Cloudflare Worker first.",503);
     if(!await owned(env,"instagram_accounts",metaConnect[1],ctx))return fail("Account not found.",404);
-    const state=crypto.randomUUID();await db(env,"meta_oauth_states","",{method:"POST",body:JSON.stringify({state,owner_id:ctx.userId,destination_account_id:metaConnect[1],expires_at:new Date(Date.now()+10*60*1000).toISOString()})});
-    const scope="instagram_business_basic,instagram_business_content_publish,instagram_business_manage_comments,instagram_business_manage_messages";
-    const target=`https://www.instagram.com/oauth/authorize?client_id=${encodeURIComponent(env.META_APP_ID)}&redirect_uri=${encodeURIComponent(env.META_REDIRECT_URI)}&state=${encodeURIComponent(state)}&response_type=code&scope=${encodeURIComponent(scope)}`;
-    return json({authorization_url:target});
+    const accessToken=String(body.access_token||"").trim();
+    if(!accessToken)return fail("Paste the System User Access Token generated in Meta Business settings.");
+    try{
+      const result=await connectMetaSystemUserToken(env,ctx,metaConnect[1],accessToken,String(body.instagram_account_id||"").trim()||undefined);
+      return json(result);
+    }catch(e:any){return fail(String(e?.message||"Meta token validation failed."),400);}
   }
   const accountMatch = p.match(/^\/accounts\/([0-9a-f-]+)$/);
   if (accountMatch && method === "PATCH") {
@@ -1065,7 +1096,7 @@ export default {
     if(url.pathname==="/api/public-config") {
       return new Response(JSON.stringify({supabaseUrl:env.SUPABASE_URL||"",publishableKey:env.SUPABASE_PUBLISHABLE_KEY||""}),{status:200,headers:{"Content-Type":"application/json","Cache-Control":"no-store, max-age=0"}});
     }
-    if(url.pathname==="/api/meta/callback") return metaCallback(req,env,url);
+    if(url.pathname==="/api/meta/callback") return new Response("BRATLOOP uses a Meta System User Access Token. Return to the app and connect from the Instagram page.",{status:410,headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"}});
     if(url.pathname.startsWith("/api/")){
       const authResult=await auth(req,env);if(!authResult.ctx)return fail(authResult.error,401);
       try{return await route(req,env,authResult.ctx,url)}catch(e:any){return fail(e.message||"Internal error",500)}

@@ -71,17 +71,29 @@ export function InstagramDashboard() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [connectingAccount, setConnectingAccount] = useState("");
+  const [accessToken, setAccessToken] = useState("");
+  const [instagramAccountId, setInstagramAccountId] = useState("");
 
   const load = () => api("/accounts").then((r) => setAccounts(r.accounts || [])).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
-  const connect = async (id: string) => {
-    setBusy(id); setError(""); setMessage("");
+  const connect = async () => {
+    if (!connectingAccount || !accessToken.trim()) return;
+    setBusy(connectingAccount); setError(""); setMessage("");
     try {
-      const r = await api(`/accounts/${id}/meta-connect`, { method: "POST", body: "{}" });
-      window.location.href = r.authorization_url;
+      const result = await api(`/accounts/${connectingAccount}/meta-connect`, {
+        method: "POST",
+        body: JSON.stringify({ access_token: accessToken.trim(), instagram_account_id: instagramAccountId.trim() || undefined })
+      });
+      setAccessToken("");
+      setInstagramAccountId("");
+      setConnectingAccount("");
+      setMessage(`Connected @${result.account?.username || "Instagram"} successfully. The token is stored encrypted in the Worker.`);
+      await load();
     } catch (e: any) {
-      setError(e.message || "Could not start Instagram connection.");
+      setError(e.message || "Meta could not validate this token.");
+    } finally {
       setBusy("");
     }
   };
@@ -89,37 +101,48 @@ export function InstagramDashboard() {
   const connected = accounts.filter((a) => a.connection_status === "connected");
   const needsConnection = accounts.filter((a) => a.connection_status !== "connected");
   const expiryLabel = (value?: string) => {
-    if (!value) return "Expiry not available";
+    if (!value) return "No expiry reported by Meta";
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "Expiry unavailable";
-    return `Token expires ${date.toLocaleDateString()} · ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    return `Token expires ${date.toLocaleDateString()}`;
   };
 
   return <>
-    <PageHead eyebrow="META PLATFORM" title="Instagram" desc="Manage Instagram connections and check the status of your Meta publishing integration." action={<button className="btn secondary" onClick={load}><RefreshCw size={14}/> Refresh</button>}/>
+    <PageHead eyebrow="META PLATFORM" title="Instagram" desc="Connect your Meta System User token and manage Instagram publishing." action={<button className="btn secondary" onClick={load}><RefreshCw size={14}/> Refresh</button>}/>
     {error && <Notice kind="error">{error}</Notice>}
     {message && <Notice kind="success">{message}</Notice>}
     <div className="stats-grid">
       <Stat label="Connected accounts" value={connected.length} note="Instagram professional accounts linked" icon={Instagram}/>
       <Stat label="Needs connection" value={needsConnection.length} note="Destination accounts not linked to Meta" icon={Activity}/>
-      <Stat label="Photo / Reel publishing" value="Enabled" note="Requires a valid token and approved permissions" icon={CheckCircle2}/>
+      <Stat label="Photo / Reel publishing" value="Enabled" note="Requires a valid token and publishing permission" icon={CheckCircle2}/>
     </div>
     <div className="panel" style={{marginTop:18}}>
-      <div className="panel-head"><div><h3>Connected Instagram accounts</h3><p>OAuth tokens are stored encrypted on the Worker side and are never displayed here.</p></div><span className="tag">{connected.length} CONNECTED</span></div>
-      {accounts.length === 0 ? <Empty title="No destination accounts" text="Add an Instagram destination account first, then connect it to Meta from this page."/> :
+      <div className="panel-head"><div><h3>Instagram destinations</h3><p>Meta tokens are sent directly to your Worker and encrypted before storage. They are never shown again.</p></div><span className="tag">{connected.length} CONNECTED</span></div>
+      {accounts.length === 0 ? <Empty title="No destination accounts" text="Add an Instagram destination account first, then connect it here."/> :
         <div className="table-wrap"><table><thead><tr><th>ACCOUNT</th><th>CONNECTION</th><th>TOKEN</th><th>STATUS</th><th></th></tr></thead><tbody>
           {accounts.map((a) => <tr key={a.id}>
             <td><b>@{a.username}</b><small>{a.display_name || "Instagram professional account"}</small></td>
             <td><span className={`state ${a.connection_status === "connected" ? "ok" : "pending"}`}><i/>{a.connection_status || "Not connected"}</span></td>
-            <td><small>{expiryLabel(a.meta_token_expires_at)}</small>{a.meta_token_refreshed_at && <small>Last refreshed {new Date(a.meta_token_refreshed_at).toLocaleString()}</small>}</td>
-            <td>{a.meta_token_refresh_error ? <small className="error-text">{a.meta_token_refresh_error}</small> : <small>{a.connection_status === "connected" ? "No token errors reported" : "Connect to authorize publishing"}</small>}</td>
-            <td><button className="btn small secondary" onClick={() => connect(a.id)} disabled={!!busy}>{busy === a.id ? <Loader2 size={13} className="spin"/> : <Instagram size={13}/>} {a.connection_status === "connected" ? "Reconnect" : "Connect"}</button></td>
+            <td><small>{expiryLabel(a.meta_token_expires_at)}</small><small>{a.meta_token_type === "system_user" ? "System User token" : a.meta_token_type === "facebook_user" ? "Facebook user token" : "Not connected"}</small></td>
+            <td>{a.meta_token_refresh_error ? <small className="error-text">{a.meta_token_refresh_error}</small> : <small>{a.connection_status === "connected" ? "No token errors reported" : "Awaiting secure token connection"}</small>}</td>
+            <td><button className="btn small secondary" onClick={() => {setConnectingAccount(a.id);setAccessToken("");setInstagramAccountId("");setError("");setMessage("");}} disabled={!!busy}>{a.connection_status === "connected" ? "Replace token" : "Connect token"}</button></td>
           </tr>)}
         </tbody></table></div>}
     </div>
+    {connectingAccount && <div className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><div><h3>Connect Meta System User token</h3><p>Paste the token from your Meta Business settings. Do not paste it into a chat or share it with anyone.</p></div><button className="btn small secondary" onClick={() => {setConnectingAccount("");setAccessToken("");setInstagramAccountId("");}}>Cancel</button></div>
+      <label>System User Access Token
+        <input type="password" autoComplete="off" value={accessToken} onChange={(e) => setAccessToken(e.target.value)} placeholder="Paste your Meta access token"/>
+      </label>
+      <label>Instagram Account ID <span className="muted">(optional, only if Meta cannot identify the asset)</span>
+        <input inputMode="numeric" value={instagramAccountId} onChange={(e) => setInstagramAccountId(e.target.value)} placeholder="Numeric Instagram professional account ID"/>
+      </label>
+      <div className="notice">BRATLOOP validates the token with Meta, checks that it has Instagram basic and content-publishing permissions, verifies the selected destination username, and encrypts the token before saving.</div>
+      <button className="btn primary" onClick={connect} disabled={!accessToken.trim() || !!busy}>{busy === connectingAccount ? <Loader2 size={14} className="spin"/> : <CheckCircle2 size={14}/>} Verify and connect</button>
+    </div>}
     <div className="section-grid" style={{marginTop:18}}>
       <div className="panel"><div className="panel-head"><div><h3>Publishing</h3><p>Instagram photo and Reel publishing.</p></div><span className="state ok"><i/>Implemented</span></div><p className="muted">Approved scheduled assignments are published by the background Worker. Photo assets are generated as JPEG; Reels use the rendered MP4.</p></div>
-      <div className="panel"><div className="panel-head"><div><h3>Comments, messages and webhooks</h3><p>Additional Instagram platform features.</p></div><span className="state pending"><i/>Not implemented</span></div><p className="muted">These features need separate API routes, webhook verification and event storage. They are not enabled by this build, and no controls are shown that would imply they work.</p></div>
+      <div className="panel"><div className="panel-head"><div><h3>Comments, messages and webhooks</h3><p>Additional Instagram platform features.</p></div><span className="state pending"><i/>Not implemented</span></div><p className="muted">These features need separate API routes, webhook verification and event storage. They are not enabled by this build.</p></div>
     </div>
   </>;
 }
