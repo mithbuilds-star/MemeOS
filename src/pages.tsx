@@ -456,7 +456,6 @@ export function Pipeline() {
       <div className="panel-head"><div><h3>Not finished</h3><p>Each item and why it is not done yet. Retry one or all.</p></div><span className="tag">{data?.items?.length??0} ITEMS</span></div>
       {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>WHY</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small>{m.why}</small></td><td>{m.processing_attempts??0} <small>{m.processing_same_error_count??0}/3 same · {m.processing_consecutive_errors??0}/5 total errors</small></td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button><button className="btn secondary small" style={{marginLeft:6}} disabled={busy===m.id} onClick={()=>{if(!confirm("Discard this item? It will not be retried."))return;discardOne(m.id)}}><X size={14}/> Discard</button></td></tr>)}</tbody></table></div>}
     </div>
-    <ActivityLog embedded />
   </>;
 }
 
@@ -484,15 +483,15 @@ export function PipelineStage({ stage }: { stage: string }) {
 }
 
 
-export function ActivityLog({ embedded = false }: { embedded?: boolean }) {
+export function ActivityLog() {
   const [items,setItems]=useState<any[]>([]);const [error,setError]=useState("");const [loading,setLoading]=useState(true);
   const load=()=>api("/activity").then(r=>{setItems(r.logs||[]);setError("");}).catch((e:any)=>setError(e.message)).finally(()=>setLoading(false));
   useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer);},[]);
   const content=<div className="panel" style={embedded?{marginTop:18}:undefined}>
-    <div className="panel-head"><div><h3>{embedded?"Activity log":"Recent activity"}</h3><p>Major batch events and reconstructed history from existing workspace records.</p></div><div style={{display:"flex",alignItems:"center",gap:10}}><span className="tag">{items.length} EVENTS</span><button className="btn small secondary" onClick={load}><Activity size={13}/> Refresh</button></div></div>
+    <div className="panel-head"><div><h3>Recent activity</h3><p>Major batch events and reconstructed history from existing workspace records.</p></div><div style={{display:"flex",alignItems:"center",gap:10}}><span className="tag">{items.length} EVENTS</span><button className="btn small secondary" onClick={load}><Activity size={13}/> Refresh</button></div></div>
     {error&&<Notice kind="warn">{error}</Notice>}
-    {loading?<p>Loading activity…</p>:items.length===0?<Empty title="No activity recorded yet" text="New batch events will appear here as the pipeline runs."/>:<div className="activity-log-table-wrap"><table className="activity-log-table"><thead><tr><th>EVENT</th><th>DETAILS</th><th>TIME</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><b>{String(item.event_type||"event").replace(/_/g," ").toUpperCase()}</b>{item.historical&&<small>RECONSTRUCTED FROM SAVED RECORDS</small>}</td><td>{item.message}{item.metadata?.count!=null&&<small>{item.metadata.count} items</small>}</td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
-    <div className="panel-foot">Historical entries are reconstructed from saved discovery, meme and assignment records. They are summaries, not a verbatim event-by-event audit trail.</div>
+    {loading?<p>Loading activity…</p>:items.length===0?<Empty title="No activity recorded yet" text="New batch events will appear here as the pipeline runs."/>:<div className="activity-log-table-wrap"><table className="activity-log-table"><thead><tr><th>EVENT</th><th>DETAILS</th><th>TIME</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><b>{String(item.event_type||"event").replace(/_/g," ")}</b></td><td>{item.message}{item.metadata?.count!=null&&<small>{item.metadata.count} items</small>}</td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
+    <div className="panel-foot">Older entries are reconstructed from saved discovery, meme and assignment records. They are summaries, not a verbatim event-by-event audit trail.</div>
   </div>;
-  return embedded?content:<><PageHead eyebrow="WORKSPACE HISTORY" title="Activity log" desc="Major pipeline events and available historical summaries."/>{content}</>;
+  return <><PageHead eyebrow="WORKSPACE HISTORY" title="Activity log" desc="Major pipeline events and available historical summaries."/>{content}</>;
 }
