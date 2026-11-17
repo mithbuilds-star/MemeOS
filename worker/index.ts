@@ -178,15 +178,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   }
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
-  // Read the complete dataset in pages; the actor can return up to 10,000
-  // results per profile and the default API page must not silently truncate it.
-  const items:any[]=[];
-  for(let offset=0;offset<10000;offset+=1000){
-    const itemsRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=1000&offset=${offset}`);
-    const page:any[]=await itemsRes.json();
-    items.push(...page);
-    if(page.length<1000)break;
-  }
+  // Every discovery run is deliberately capped at one 25-post page.
+  const itemsRes=await apifyRequestWithFallback(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`);
+  const items:any[]=await itemsRes.json();
   // Backfill runs are bounded by the oldest post in the incremental result.
   // The official Apify actor has no onlyPostsOlderThan input, so enforce the
   // cutoff locally after fetching its maximum timeline; compatible custom actors
@@ -229,22 +223,55 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch { skipped++; }
   }
   const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];
-  // Only the incremental pass advances the successful cursor. A historical
-  // backfill is deliberately independent and must never move it backwards.
-  if(job.metadata?.phase!=="backfill"){
+  const isBackfill=job.metadata?.phase==="backfill";
+  const sourceId=job.metadata?.source_reference_account_id;
+  let source:any=null;
+  if(sourceId){
+    const sourceRows=await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete`);
+    source=sourceRows?.[0]||null;
+  }
+  if(source){
+    if(isBackfill){
+      const timestamps=items.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
+      const oldest=timestamps.length?new Date(Math.min(...timestamps)).toISOString():null;
+      // A short page means the actor reached the end of the available history.
+      // Persist the exact timestamp (not just the calendar date) so same-day posts
+      // are not skipped by the next page.
+      const complete=items.length<SCRAPE_BATCH||!oldest;
+      await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({backfill_before:oldest||job.metadata?.backfill_before||source.backfill_before,backfill_complete:complete,last_scrape_status:"completed"})});
+    }else{
+      const timestamps=items.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
+      const oldest=timestamps.length?new Date(Math.min(...timestamps)).toISOString():null;
+      // Seed the historical cursor from the oldest post in the first bounded
+      // incremental page. Existing accounts fall back to their prior scrape time.
+      const backfillBefore=source.backfill_before||oldest||job.metadata?.last_successful_scrape_at||job.created_at||null;
+      const cursorAt=job.created_at||new Date().toISOString();
+      await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed",...(backfillBefore?{backfill_before:backfillBefore}:{})})});
+      // Fewer than five genuinely new posts is the signal to fetch the next
+      // historical page. This starts exactly one 25-post page; the next page is
+      // only requested after a later incremental scan again finds <5 new posts.
+      if(batch.length<SCRAPE_BACKFILL_THRESHOLD&&backfillBefore&&!source.backfill_complete){
+        const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(source.id)}&metadata->>phase=eq.backfill&select=id&limit=1`);
+        if(!active.length){
+          const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+          if(credentials.length){
+            try{await startApifyDiscoveryForSource(env,ctx,source,credentials,false,"backfill",backfillBefore);}
+            catch(error:any){console.error("Historical backfill start failed",source.username,String(error?.message||error));}
+          }
+        }
+      }
+    }
+  }else if(!isBackfill){
     const cursorAt=job.created_at||new Date().toISOString();
     for(const username of sourceNames){
       const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);
-      for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});
+      for(const row of sourceRows)await db(env,"reference_accounts",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});
     }
   }
-  // Historical backfill is intentionally manual. Automatically fetching an entire
-  // profile timeline when fewer than five new posts appear can consume thousands
-  // of paid Apify results while importing very little content.
-  await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,inserted,skipped,failed_media:failedMedia}})});
+  await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia}})});
   await refreshAllCredentialUsage(env,ctx);
-  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
-  return {done:true,status:"SUCCEEDED",items_seen:items.length,inserted,skipped,failed_media:failedMedia};
+  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames,phase:isBackfill?"backfill":"incremental"});
+  return {done:true,status:"SUCCEEDED",items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia};
 }
 
 
@@ -548,7 +575,7 @@ const DEFAULT_APIFY_ACTOR = "coregent/instagram-posts-scraper";
 const SCRAPE_BATCH=25;
 const SCRAPE_BACKFILL_THRESHOLD=5;
 
-async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false){
+async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null){
   let lastError="No Apify key could start the run.";
   for(const credential of credentials){
     if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
@@ -559,8 +586,11 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       // and its incompatible input/output schema.
       const actorId=DEFAULT_APIFY_ACTOR;
       const actor=encodeURIComponent(actorId.replace("/","~"));
-      // Fetch a bounded page of profile posts; incremental cursor avoids re-importing history.
-      const input=buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,source.last_scraped_at||null);
+      // Incremental runs look forward from last_scraped_at. Backfill runs look
+      // backward from the exact timestamp saved after the previous 25-post page.
+      const input=phase==="backfill"
+        ?buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,null,backfillBefore||source.backfill_before)
+        :buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,source.last_scraped_at||null);
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
@@ -573,7 +603,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,last_successful_scrape_at:source.last_scraped_at||null}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase,backfill_before:phase==="backfill"?(backfillBefore||source.backfill_before||null):null,last_successful_scrape_at:source.last_scraped_at||null}})});
       if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
       return job[0];
     }catch(e:any){lastError=e?.message||lastError;}
@@ -598,7 +628,7 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
     const parsed=new Date(olderThan);
     if(!Number.isNaN(parsed.getTime())){
       delete input.postsNewerThan;
-      input.postsOlderThan=parsed.toISOString().slice(0,10);
+      input.postsOlderThan=parsed.toISOString();
     }
   }
   return input;
@@ -729,7 +759,7 @@ async function runScheduledDiscovery(env:Env){
     const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&discovery_enabled=eq.true&select=id`);if(!accounts.length)continue;
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let all=false;for(const a of accounts){const own=mappings.filter((m:any)=>m.destination_account_id===a.id);if(!own.length)all=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at`);
+    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete`);
     const selected=all?sources:sources.filter((s:any)=>allowed.has(s.id));if(!selected.length)continue;
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)continue;
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
