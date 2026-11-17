@@ -1223,7 +1223,10 @@ async function scheduleDailyAutoPosts(env:Env,ctx:Ctx,settings:any){
     return new Date(guess);
   };
   const slots=ranked[day].map(t=>toIso(t)).filter(d=>d.getTime()>Date.now()+60000);
-  const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&scheduled_at=gte.${encodeURIComponent(toIso("00:00").toISOString())}&select=scheduled_at,auto_scheduled`);
+  const startOfToday=toIso("00:00");
+  const stale=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&auto_scheduled=eq.true&status=eq.scheduled&scheduled_at=lt.${encodeURIComponent(startOfToday.toISOString())}&select=id`);
+  for(const item of stale||[])await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.scheduled`,{method:"PATCH",body:JSON.stringify({scheduled_at:null,status:"approved",auto_scheduled:false})});
+  const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&scheduled_at=gte.${encodeURIComponent(startOfToday.toISOString())}&select=scheduled_at,auto_scheduled`);
   const todays=(existing||[]).filter((r:any)=>String(r.scheduled_at||"").startsWith(date));
   const used=new Set(todays.map((r:any)=>new Date(r.scheduled_at).getTime()));
   const autoCount=todays.filter((r:any)=>r.auto_scheduled).length;
