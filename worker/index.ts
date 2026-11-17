@@ -232,15 +232,15 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   }
   if(source){
     if(isBackfill){
-      const timestamps=items.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
+      const timestamps=batch.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
       const oldest=timestamps.length?new Date(Math.min(...timestamps)).toISOString():null;
-      // A short page means the actor reached the end of the available history.
+      // A short eligible page means the actor reached the end of the available history.
       // Persist the exact timestamp (not just the calendar date) so same-day posts
       // are not skipped by the next page.
-      const complete=items.length<SCRAPE_BATCH||!oldest;
+      const complete=batch.length<SCRAPE_BATCH||!oldest;
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({backfill_before:oldest||job.metadata?.backfill_before||source.backfill_before,backfill_complete:complete,last_scrape_status:"completed"})});
     }else{
-      const timestamps=items.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
+      const timestamps=batch.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
       const oldest=timestamps.length?new Date(Math.min(...timestamps)).toISOString():null;
       // Seed the historical cursor from the oldest post in the first bounded
       // incremental page. Existing accounts fall back to their prior scrape time.
