@@ -256,7 +256,7 @@ main().catch(async (e) => {
   console.error(e);
   try {
     if (env.SUPABASE_URL && env.SUPABASE_SECRET_KEY && env.MEME_ID && env.OWNER_ID) {
-      const error = String(e?.message || e || 'Unknown render error').trim().replace(/\\s+/g, ' ').slice(0, 500);
+      const error = String(e?.message || e || 'Unknown render error').trim().replace(/\s+/g, ' ').slice(0, 500);
       const key = error.toLowerCase();
       const consecutive = Number((await fetch(`${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}&select=processing_consecutive_errors,processing_same_error_count,processing_last_error_key`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }).then(r => r.json()).then(rows => rows?.[0]))?.processing_consecutive_errors || 0) + 1;
       const prior = await fetch(`${SUPABASE_URL}/rest/v1/memes?id=eq.${encodeURIComponent(MEME_ID)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}&select=processing_same_error_count,processing_last_error_key`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }).then(r => r.json()).then(rows => rows?.[0] || {});
