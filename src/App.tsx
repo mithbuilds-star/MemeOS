@@ -14,7 +14,7 @@ const nav = [
   ["Discovery", "/discovery", Compass], ["Approval Queue", "/queue", CheckCheck],
   ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage], ["Meme Creator", "/creator", Clapperboard],
   ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow],
-  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity],["Pipeline", "/pipeline", Activity], ["Help", "/help", BookOpen],
+  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", Activity], ["Activity Log", "/activity", Activity], ["Pipeline", "/pipeline", Activity], ["Help", "/help", BookOpen],
   ["Settings", "/settings", Settings]
 ] as const;
 
