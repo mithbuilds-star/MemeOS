@@ -6,7 +6,7 @@ import { api } from "./lib/api";
 import type { Meme } from "./lib/types";
 
 function PageHead({ eyebrow, title, desc, action }: any) {
-  return <div className="page-head"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{desc}</p></div>{action}</div>;
+  return <div className="page-head"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1></div>{action}</div>;
 }
 function Stat({ label, value, note, icon: Icon }: any) {
   return <div className="stat-card"><div className="stat-top"><span>{label}</span><Icon size={17}/></div><strong>{value}</strong><small>{note}</small></div>;
@@ -15,6 +15,36 @@ function Empty({ title, text, action }: any) {
   return <div className="empty"><div className="empty-icon"><ImagePlus size={21}/></div><b>{title}</b><p>{text}</p>{action}</div>;
 }
 function Notice({ children, kind = "info" }: any) { return <div className={`notice ${kind}`}>{children}</div>; }
+
+
+const helpArticles = [
+  {id:"auto-fill",title:"Fill all approved posts in queue order",body:"Turn on Auto-post to fill all approved posts in queue order, cycling through daily posting slots across the rolling schedule until all approved posts have times.",keywords:"auto post auto-post fill queue approved posts order schedule all slots"},
+  {id:"auto-pause",title:"Pause Auto-post without losing saved times",body:"Turn Auto-post off to pause automatic publishing. Existing auto-post times stay saved. They will not publish automatically while Auto-post is off. Use Schedule on a post when you want to activate that saved time manually.",keywords:"turn off disable pause stop auto-post keep retain preserve times not scheduled publish"},
+  {id:"manual-schedule",title:"Schedule a post manually",body:"Choose a date and time on an approved post, then select Schedule. A manually scheduled post can publish even when Auto-post is off.",keywords:"manual schedule date time publish post"},
+  {id:"posts-per-day",title:"Change Posts / day",body:"Use the Posts / day dropdown in Scheduler to choose how many posts Auto-post assigns each day.",keywords:"posts per day daily frequency dropdown 3x"},
+  {id:"approve",title:"Approve content",body:"Open Approval Queue and approve the content you want to publish. Only approved assignments can be scheduled.",keywords:"approval queue approve meme content"},
+  {id:"reels",title:"Prepare a Reel for publishing",body:"A Reel must finish rendering and have an enabled song selected before it can be scheduled.",keywords:"reel render song music audio ready"},
+  {id:"captions",title:"Generate missing captions",body:"In Scheduler, use Generate missing captions. MemeOS uses the enabled Groq key and readable meme text to create short captions.",keywords:"caption generate missing groq ai"},
+  {id:"accounts",title:"Connect an Instagram account",body:"Open Instagram, choose the destination account, and connect it using the Meta System User Access Token flow.",keywords:"instagram account connect meta token"},
+  {id:"discovery",title:"Run meme discovery",body:"Open Discovery, configure reference sources, and run discovery to collect source posts for your workspace.",keywords:"discover scrape source reference apify"},
+  {id:"songs",title:"Manage Reel songs",body:"Upload and enable tracks in Song Library. Enabled tracks can be mixed into generated Reels.",keywords:"song library upload enable track audio"},
+  {id:"analytics",title:"Refresh analytics",body:"Open Analytics and select Sync Meta insights to request the latest available metrics.",keywords:"analytics insights metrics sync"}
+];
+export function Help() {
+  const [query,setQuery]=useState("");
+  const [result,setResult]=useState<any>(null);
+  const [busy,setBusy]=useState(false);
+  const [error,setError]=useState("");
+  const [searched,setSearched]=useState(false);
+  const search=async(e?:React.FormEvent)=>{
+    e?.preventDefault();const q=query.trim();if(!q)return;
+    setBusy(true);setError("");setResult(null);setSearched(true);
+    try{const r=await api("/help/search",{method:"POST",body:JSON.stringify({query:q,articles:helpArticles.map(({id,title,body})=>({id,title,body}))})});const found=helpArticles.find(a=>a.id===r.article_id);if(!found)throw new Error("No matching Help article was found. Try another wording.");setResult(found);}
+    catch(err:any){setError(err.message||"Help search failed.");}
+    finally{setBusy(false);}
+  };
+  return <><PageHead eyebrow="WORKSPACE GUIDE" title="Help"/><div className="panel help-panel"><form className="help-search" onSubmit={search}><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Ask in your own words…" aria-label="Search Help"/><button className="btn primary" type="submit" disabled={busy||!query.trim()}>{busy?"Searching…":"Search"}</button></form>{error&&<Notice kind="warn">{error}</Notice>}{result&&<article className="help-result"><div className="eyebrow">BEST MATCH</div><h3>{result.title}</h3><p>{result.body}</p><button className="btn secondary" onClick={()=>{const target=result.id==="auto-fill"||result.id==="auto-pause"||result.id==="posts-per-day"||result.id==="manual-schedule"?"/scheduler":result.id==="approve"?"/queue":result.id==="accounts"?"/instagram":result.id==="discovery"?"/discovery":result.id==="songs"?"/songs":result.id==="analytics"?"/analytics":"/scheduler";window.location.href=target;}}>Open page</button></article>}{searched&&!result&&!error&&<p>No matching help article.</p>}<div className="help-topics"><h3>Browse Help topics</h3>{helpArticles.map(a=><button key={a.id} onClick={()=>{setResult(a);setError("");setSearched(true)}}><span>{a.title}</span><span>›</span></button>)}</div></div></>;
+}
 
 export function Login({ configured }: { configured: boolean }) {
   const [mode, setMode] = useState<"login"|"signup">("login");
@@ -275,16 +305,15 @@ export function Scheduler() {
   };
   const chooseDate=(id:string,date:string)=>{setTimes(v=>({...v,[id]:{...(v[id]||{time:"18:00"}),date}}));setCalendarOpen(null)};
   const calendarDays=(month:Date)=>{const first=new Date(month.getFullYear(),month.getMonth(),1);const offset=first.getDay();return Array.from({length:42},(_,n)=>new Date(month.getFullYear(),month.getMonth(),n-offset+1))};
-  return <><PageHead eyebrow="PUBLISHING WORKFLOW" title="Scheduler" desc="Plan your approved memes and let BRATLOOP publish at the selected times."/>
+  return <><PageHead eyebrow="PUBLISHING WORKFLOW" title="Scheduler"/>
     <div className="panel scheduler-panel">
       <div className="panel-head scheduler-topbar">
-        <div><h3>Approved content & upcoming schedule</h3><p>Auto-post assigns the newest approved posts to ascending time slots, then continues across future days until the approved queue is scheduled.</p></div>
+        <div><h3>Approved content & upcoming schedule</h3></div>
         <div className="scheduler-auto-controls">
           <div className="posts-per-day"><span>POSTS / DAY</span><Select value={String(postsPerDay)} onChange={async(v:string)=>{const n=Number(v);setPostsPerDay(n);try{await api("/settings",{method:"PATCH",body:JSON.stringify({posts_per_day:n})})}catch(err:any){setError(err.message)}}} placeholder="Posts per day" defaultValue="3" defaultLabel="3×" searchable={false} options={Array.from({length:10},(_,i)=>({value:String(i+1),label:(i+1)+"×"}))}/></div>
           <button className={"auto-post-toggle "+(autoPost?"enabled":"")} onClick={toggleAuto} disabled={autoBusy}><span className="auto-toggle-track"><i/></span><span>{autoBusy?"Applying…":autoPost?"Auto-post on":"Auto-post off"}</span></button>
         </div>
       </div>
-      <div className="scheduler-auto-note">{autoPost?"Auto-post is active. Turning it off pauses auto-filled posts without clearing their scheduled times.":"Turn on Auto-post to fill all approved posts in queue order, cycling through daily posting slots across the rolling schedule until all approved posts have times."}</div>
       <div className="scheduler-count-row"><span>{items.filter(i=>i.scheduled_at).length} scheduled</span><span>{items.filter(i=>i.approval_status==="approved"&&!i.scheduled_at).length} ready to schedule</span></div>
       {missingCaptionIds.length>0&&<div className="scheduler-caption-backfill"><span>{missingCaptionIds.length} post(s) missing captions</span><button className="btn small secondary" onClick={backfillCaptions} disabled={captionBusy}>{captionBusy?<Loader2 className="spin" size={14}/>:<Sparkles size={14}/>} {captionBusy?"Generating…":"Generate missing captions"}</button></div>}
       {captionStatus&&<Notice kind="info">{captionStatus}</Notice>}
@@ -313,7 +342,7 @@ export function Scheduler() {
               </div>
               <div className="schedule-field"><span className="schedule-control-label">TIME</span><Select value={value.time} onChange={(time:string)=>setTimes(v=>({...v,[i.id]:{...value,time}}))} placeholder="Choose time" defaultValue="18:00" defaultLabel="6:00 PM" options={timeOptions.map(t=>({value:t,label:new Date("2000-01-01T"+t+":00").toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}))}/></div>
             </div>}
-            <div className="schedule-actions"><button className="btn small secondary" disabled={busy===i.id||busy===i.meme_id} onClick={()=>{setEditingCaption(editingCaption===i.meme_id?null:i.meme_id);setCaptionDraft(i.memes?.social_caption||"")}}>Edit caption</button>{i.scheduled_at?<button className="btn small secondary" disabled={busy===i.id} onClick={()=>cancel(i.id)}>Cancel schedule</button>:<button className="btn small primary" disabled={busy===i.id||!value.date} onClick={()=>schedule(i.id)}>Schedule</button>}</div>
+            <div className="schedule-actions"><button className="btn small secondary" disabled={busy===i.id||busy===i.meme_id} onClick={()=>{setEditingCaption(editingCaption===i.meme_id?null:i.meme_id);setCaptionDraft(i.memes?.social_caption||"")}}>Edit caption</button>{i.scheduled_at?<><button className="btn small primary" disabled={busy===i.id||(!i.auto_scheduled&&!autoPost)} onClick={()=>schedule(i.id)}>Schedule</button><button className="btn small secondary" disabled={busy===i.id} onClick={()=>cancel(i.id)}>Cancel schedule</button></>:<button className="btn small primary" disabled={busy===i.id||!value.date} onClick={()=>schedule(i.id)}>Schedule</button>}</div>
           </div>
         </article>
       })}</div>}
