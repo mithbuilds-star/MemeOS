@@ -555,18 +555,36 @@ async function connectMetaSystemUserToken(env: Env, ctx: Ctx, accountId: string,
   const destination = accountRows?.[0];
   if (!destination) throw new Error("Destination account not found.");
   let selected: any = null;
+  let lastAssetError = "";
   for (const candidate of candidates) {
-    const profileUrl = new URL("https://graph.facebook.com/" + version + "/" + encodeURIComponent(candidate));
-    profileUrl.searchParams.set("fields", "id,username,account_type,profile_picture_url");
-    profileUrl.searchParams.set("access_token", accessToken);
-    const profileRes = await fetch(profileUrl.toString());
-    const profile: any = await profileRes.json().catch(() => ({}));
-    if (profileRes.ok && profile.username && String(profile.username).toLowerCase() === String(destination.username).toLowerCase()) {
-      selected = profile;
+    // Business Portfolio Instagram asset IDs are not always the same as the IG User ID.
+    // Resolve the asset using the documented IG Business Asset fields, then store ig_user_id
+    // because publishing endpoints require the Instagram User ID.
+    const assetUrl = new URL("https://graph.facebook.com/" + version + "/" + encodeURIComponent(candidate));
+    assetUrl.searchParams.set("fields", "id,ig_user_id,ig_username");
+    assetUrl.searchParams.set("access_token", accessToken);
+    const assetRes = await fetch(assetUrl.toString());
+    const asset: any = await assetRes.json().catch(() => ({}));
+    if (!assetRes.ok) {
+      lastAssetError = asset.error?.message || "Meta could not read the supplied Instagram asset.";
+      continue;
+    }
+    const assetUsername = String(asset.ig_username || asset.username || "").replace(/^@/, "").toLowerCase();
+    const igUserId = String(asset.ig_user_id || "");
+    if (assetUsername === String(destination.username).replace(/^@/, "").toLowerCase() && /^\\d{5,30}$/.test(igUserId)) {
+      selected = {
+        id: igUserId,
+        username: assetUsername,
+        account_type: "BUSINESS",
+        profile_picture_url: null,
+        business_asset_id: String(asset.id || candidate)
+      };
       break;
     }
   }
-  if (!selected) throw new Error("The token is valid, but none of its Instagram assets matched @" + destination.username + ". Check that this Instagram account is assigned to the System User and that the destination username is correct.");
+  if (!selected) {
+    throw new Error("Meta validated the token, but BRATLOOP could not resolve the supplied Business Portfolio Instagram asset to @" + destination.username + ". Make sure you entered the Instagram Business Asset ID (not the Business Portfolio ID or Page ID), and that the System User has CONTENT access. " + (lastAssetError ? "Meta API detail: " + lastAssetError : ""));
+  }
   const encrypted = await encryptSecret(env, accessToken);
   const expiresAt = Number(debug.expires_at || 0) > 0 ? new Date(Number(debug.expires_at) * 1000).toISOString() : null;
   const tokenType = expiresAt ? "facebook_user" : "system_user";
