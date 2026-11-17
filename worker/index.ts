@@ -946,8 +946,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   if(relMatch&&method==="DELETE") {const r=await db(env,"account_relationships",`?id=eq.${relMatch[1]}&${userFilter(ctx)}&select=id`);if(!r.length)return fail("Relationship not found.",404);await db(env,"account_relationships",`?id=eq.${relMatch[1]}&${userFilter(ctx)}`,{method:"DELETE"});return json({ok:true});}
 
   if(p==="/scheduler/auto-fill"&&method==="POST"){
-    const ids=Array.isArray(body.assignment_ids)?body.assignment_ids.map((x:any)=>String(x)).slice(0,300):[];
-    const slots=Array.isArray(body.scheduled_at)?body.scheduled_at.slice(0,300):[];
+    const ids=Array.isArray(body.assignment_ids)?body.assignment_ids.map((x:any)=>String(x)).slice(0,5):[];
+    const slots=Array.isArray(body.scheduled_at)?body.scheduled_at.slice(0,5):[];
     if(!ids.length||ids.length!==slots.length)return fail("Choose matching approved posts and future time slots.");
     const results=[];
     for(let i=0;i<ids.length;i++){
@@ -1052,6 +1052,39 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=neq.discarded&reel_status=in.(render_failed,renderer_not_configured,rendering)&select=id`,{ method: "PATCH", body: JSON.stringify({ reel_status: "render_failed", reel_render_locked_until: null, reel_render_next_retry_at: new Date().toISOString(), processing_error: null }) });
     return json({ requeued, reel_requeued: reelRows.length });
   }
+
+  if(p==="/help/search"&&method==="POST"){
+    const query=String(body.query||"").trim().slice(0,500);
+    if(!query)return fail("Enter a Help question.");
+    const articles=[
+      {id:"auto-fill",title:"Fill all approved posts in queue order",body:"Turn on Auto-post to fill all approved posts in queue order, cycling through daily posting slots across the rolling schedule until all approved posts have times."},
+      {id:"auto-pause",title:"Pause Auto-post without losing saved times",body:"Turn Auto-post off to pause automatic publishing. Existing auto-post times stay saved. They will not publish automatically while Auto-post is off. Use Schedule on a post when you want to activate that saved time manually."},
+      {id:"manual-schedule",title:"Schedule a post manually",body:"Choose a date and time on an approved post, then select Schedule. A manually scheduled post can publish even when Auto-post is off."},
+      {id:"posts-per-day",title:"Change Posts / day",body:"Use the Posts / day dropdown in Scheduler to choose how many posts Auto-post assigns each day."},
+      {id:"approve",title:"Approve content",body:"Open Approval Queue and approve the content you want to publish. Only approved assignments can be scheduled."},
+      {id:"reels",title:"Prepare a Reel for publishing",body:"A Reel must finish rendering and have an enabled song selected before it can be scheduled."},
+      {id:"captions",title:"Generate missing captions",body:"In Scheduler, use Generate missing captions. MemeOS uses the enabled Groq key and readable meme text to create short captions."},
+      {id:"accounts",title:"Connect an Instagram account",body:"Open Instagram, choose the destination account, and connect it using the Meta System User Access Token flow."},
+      {id:"discovery",title:"Run meme discovery",body:"Open Discovery, configure reference sources, and run discovery to collect source posts for your workspace."},
+      {id:"songs",title:"Manage Reel songs",body:"Upload and enable tracks in Song Library. Enabled tracks can be mixed into generated Reels."},
+      {id:"analytics",title:"Refresh analytics",body:"Open Analytics and select Sync Meta insights to request the latest available metrics."}
+    ];
+    const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.groq&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+    if(!creds.length)return fail("AI Help search needs an enabled Groq key. Add one in Settings → API Manager.",503);
+    let lastError="AI Help search could not find a match.";
+    for(const credential of creds){try{
+      const secret=await decryptSecret(env,credential);
+      const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+secret,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Match the user's natural-language question to exactly one Help article. Choose the closest article even if the wording differs. Return JSON only: {\"article_id\":\"one supplied id\"}. Never invent an id."},{role:"user",content:JSON.stringify({query,articles:articles.map(({id,title,body})=>({id,title,body}))})}]})});
+      const data:any=await response.json().catch(()=>({}));
+      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;if(response.status===429||response.status===401||response.status>=500)continue;break;}
+      const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}"),article=articles.find(x=>x.id===parsed.article_id);
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+      if(!article)return fail("No matching Help article. Try describing what you want to do another way.",404);
+      return json({article_id:article.id});
+    }catch(e:any){lastError=e.message||lastError;}}
+    return fail(lastError,502);
+  }
+
   if(p==="/settings"&&method==="GET") {const rows=await db(env,"user_settings",`?${userFilter(ctx)}&select=*`);return json({settings:rows[0]||{global_paused:false,auto_process_enabled:true,video_freeze_seconds:2,discovery_interval_minutes:60,timezone:"Asia/Kolkata",auto_post_enabled:false,posts_per_day:3}});}
   const processMatch=p.match(/^\/memes\/([0-9a-f-]+)\/process$/);
   if(processMatch&&method==="POST"){
@@ -1209,19 +1242,23 @@ async function scheduleDailyAutoPosts(env:Env,ctx:Ctx,settings:any){
   const toIso=(date:string,time:string)=>{const b=date.split("-").map(Number),c=time.split(":").map(Number),target=Date.UTC(b[0],b[1]-1,b[2],c[0],c[1]);let guess=target;for(let n=0;n<3;n++){const p=new Intl.DateTimeFormat("en-US",{timeZone:timezone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(new Date(guess));const v=(t:string)=>Number(p.find((x:any)=>x.type===t)?.value||0);guess+=target-Date.UTC(v("year"),v("month")-1,v("day"),v("hour"),v("minute"));}return new Date(guess)};
   const ranked=[["19:00","18:00","20:00","15:00","16:00","14:00","17:00","21:00","12:00","11:00"],["19:00","15:00","17:00","16:00","18:00","14:00","13:00","20:00","21:00","12:00"],["12:00","18:00","20:00","19:00","17:00","15:00","21:00","14:00","11:00","09:00"],["09:00","08:00","07:00","13:00","12:00","14:00","18:00","19:00","20:00","17:00"],["22:00","21:00","18:00","16:00","19:00","20:00","17:00","12:00","14:00","15:00"],["21:00","22:00","20:00","17:00","18:00","19:00","15:00","12:00","14:00","16:00"],["21:00","22:00","20:00","19:00","18:00","17:00","15:00","14:00","12:00","11:00"]];
   const today=localDateKey(now),startOfToday=toIso(today,"00:00");
-  const stale=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&auto_scheduled=eq.true&status=eq.scheduled&scheduled_at=lt.${encodeURIComponent(startOfToday.toISOString())}&select=id`);
-  for(const item of stale||[])await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.scheduled`,{method:"PATCH",body:JSON.stringify({scheduled_at:null,status:"approved",auto_scheduled:false})});
+  await db(env,"account_meme_assignments",`?${userFilter(ctx)}&auto_scheduled=eq.true&status=eq.scheduled&scheduled_at=lt.${encodeURIComponent(startOfToday.toISOString())}`,{method:"PATCH",body:JSON.stringify({scheduled_at:null,status:"approved",auto_scheduled:false})});
   const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&scheduled_at=gte.${encodeURIComponent(now.toISOString())}&select=scheduled_at&limit=1000`);
   const usedByDay=new Map<string,Set<number>>(),countByDay=new Map<string,number>();
   for(const row of existing||[]){if(!row.scheduled_at)continue;const instant=new Date(row.scheduled_at),key=localDateKey(instant);if(!usedByDay.has(key))usedByDay.set(key,new Set<number>());usedByDay.get(key)!.add(instant.getTime());countByDay.set(key,(countByDay.get(key)||0)+1);}
   const dailyLimit=Math.max(1,Math.min(10,Number(settings.posts_per_day||3))),available:Date[]=[];
-  const queue=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.approved&status=in.(approved,pending)&scheduled_at=is.null&select=id,publish_format,meme_id&order=created_at.desc&limit=300`);
-  const horizon=Math.min(365,Math.ceil((queue.length+(existing||[]).length)/dailyLimit)+7),todayParts=today.split("-").map(Number);
-  for(let offset=0;offset<horizon;offset++){const d=new Date(Date.UTC(todayParts[0],todayParts[1]-1,todayParts[2]+offset,12));const date=d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0")+"-"+String(d.getUTCDate()).padStart(2,"0"),day=d.getUTCDay(),used=usedByDay.get(date)||new Set<number>();let remaining=dailyLimit-(countByDay.get(date)||0);if(remaining<=0)continue;const daySlots:Date[]=[];for(const time of ranked[day]){const slot=toIso(date,time);if(slot.getTime()<=now.getTime()+60000||used.has(slot.getTime()))continue;daySlots.push(slot);if(daySlots.length>=remaining)break;}daySlots.sort((a,b)=>a.getTime()-b.getTime());available.push(...daySlots);}
-  if(!available.length)return;
+  // Process a small slice on each cron tick. This keeps Supabase subrequests bounded.
+  const queue=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&approval_status=eq.approved&status=in.(approved,pending)&scheduled_at=is.null&select=id,publish_format,meme_id&order=created_at.desc&limit=5`);
+  if(!queue.length)return;
+  const memeIds=[...new Set(queue.filter((x:any)=>x.publish_format==="reel").map((x:any)=>x.meme_id))];
+  const memeRows=memeIds.length?await db(env,"memes",`?${userFilter(ctx)}&id=in.(${memeIds.join(",")})&select=id,reel_status,reel_song_id`):[];
+  const memeMap=new Map((memeRows||[]).map((m:any)=>[m.id,m]));
+  const readyQueue=queue.filter((item:any)=>item.publish_format!=="reel"||(memeMap.get(item.meme_id) as any)?.reel_status==="generated"&&(memeMap.get(item.meme_id) as any)?.reel_song_id);
+  const horizon=Math.min(365,Math.ceil((readyQueue.length+(existing||[]).length)/dailyLimit)+7),todayParts=today.split("-").map(Number);
+  for(let offset=0;offset<horizon;offset++){const d=new Date(Date.UTC(todayParts[0],todayParts[1]-1,todayParts[2]+offset,12));const date=d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0")+"-"+String(d.getUTCDate()).padStart(2,"0"),day=d.getUTCDay(),used=usedByDay.get(date)||new Set<number>();let remaining=dailyLimit-(countByDay.get(date)||0);if(remaining<=0)continue;const daySlots:Date[]=[];for(const time of ranked[day]){const slot=toIso(date,time);if(slot.getTime()<=now.getTime()+60000||used.has(slot.getTime()))continue;daySlots.push(slot);if(daySlots.length>=remaining)break;}daySlots.sort((a,b)=>a.getTime()-b.getTime());available.push(...daySlots);if(available.length>=readyQueue.length)break;}
   let slotIndex=0,count=0;
-  for(const item of queue){if(slotIndex>=available.length)break;if(item.publish_format==="reel"){const meme=await db(env,"memes",`?id=eq.${item.meme_id}&${userFilter(ctx)}&select=reel_status,reel_song_id`);if(meme[0]?.reel_status!=="generated"||!meme[0]?.reel_song_id)continue;}const slot=available[slotIndex],updated=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&scheduled_at=is.null`,{method:"PATCH",body:JSON.stringify({scheduled_at:slot.toISOString(),status:"scheduled",auto_scheduled:true})});if(updated?.length){slotIndex++;count++;const key=localDateKey(slot);if(!usedByDay.has(key))usedByDay.set(key,new Set<number>());usedByDay.get(key)!.add(slot.getTime());countByDay.set(key,(countByDay.get(key)||0)+1);}}
-  if(count)console.log("Rolling auto-scheduled posts",ctx.userId,count,"over 30 days");
+  for(const item of readyQueue){if(slotIndex>=available.length)break;const slot=available[slotIndex],updated=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&scheduled_at=is.null`,{method:"PATCH",body:JSON.stringify({scheduled_at:slot.toISOString(),status:"scheduled",auto_scheduled:true})});if(updated?.length){slotIndex++;count++;}}
+  if(count)console.log("Rolling auto-scheduled posts",ctx.userId,count);
 }
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
