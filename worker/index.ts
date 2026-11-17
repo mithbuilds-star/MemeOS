@@ -540,8 +540,8 @@ async function connectMetaSystemUserToken(env: Env, ctx: Ctx, accountId: string,
   if (!debugRes.ok || !debug.is_valid) throw new Error(debugBody.error?.message || "Meta says this token is invalid or revoked.");
   if (debug.app_id && String(debug.app_id) !== String(env.META_APP_ID)) throw new Error("This token belongs to a different Meta app. Generate it from the app configured for BRATLOOP.");
   const scopes: string[] = Array.isArray(debug.scopes) ? debug.scopes : [];
-  const hasBasic = scopes.includes("instagram_basic") || scopes.includes("instagram_business_basic");
-  const hasPublish = scopes.includes("instagram_content_publish") || scopes.includes("instagram_business_content_publish");
+  const hasBasic = scopes.includes("instagram_basic");
+  const hasPublish = scopes.includes("instagram_content_publish");
   if (!hasBasic || !hasPublish) throw new Error("This token is missing Instagram permissions. Enable instagram_basic and instagram_content_publish in your Meta configuration, then generate a new token.");
   const candidates = new Set<string>();
   for (const grant of (Array.isArray(debug.granular_scopes) ? debug.granular_scopes : [])) {
