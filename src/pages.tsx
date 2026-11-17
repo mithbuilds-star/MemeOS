@@ -467,7 +467,7 @@ export function Pipeline() {
           {i<6&&<div style={{fontSize:18,opacity:.5,marginTop:8}} aria-hidden="true">↓</div>}
         </div>)}
       </div>
-      <div style={{marginTop:14,fontSize:12,opacity:.7}}>The main path is Discovered → To be processed → Processing → Processed → Approval queue → Scheduled → Published. Rejected, discarded, media-unavailable and low-confidence items end in separate terminal outcomes and stay in your history.</div>
+      <div style={{marginTop:14,fontSize:12,opacity:.7}}>The main path is Discovered → To be processed → Processing → Processed → Approval queue → Scheduled → Published. Rejected, discarded, media-unavailable and low-confidence items end in separate terminal outcomes and stay in your history. Approval, scheduled and published counts are destination assignments, so one meme can count more than once when sent to multiple accounts.</div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
         {(data?.flow||[]).filter((x:any)=>["rejected","discarded","media_unavailable","low_confidence"].includes(x.key)).map((stage:any)=><span key={stage.key} className="tag">{stage.label}: {stage.count}</span>)}
       </div>
