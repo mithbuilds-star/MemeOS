@@ -75,6 +75,7 @@ async function decryptSecret(env: Env, row: any): Promise<string> {
   const plain = await crypto.subtle.decrypt({name:"AES-GCM",iv:b64ToBytes(row.encryption_iv)}, await cryptoKey(env), b64ToBytes(row.encrypted_secret));
   return new TextDecoder().decode(plain);
 }
+function credentialFailureStatus(status:number,currentStatus?:string){if(status===429)return "rate_limited";if(status===401||status===403)return "error";return currentStatus||"untested";}
 function credentialView(row: any) {
   return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null),enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at};
 }
@@ -190,7 +191,7 @@ async function classifyTextWithGroq(env:Env,ctx:Ctx,text:string){
       const secret=await decryptSecret(env,credential);
       const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Classify whether a meme can be faithfully converted into a text-only BRAT-style image. Return JSON only: {\"suitable\":boolean,\"reason\":string}. suitable=true only when the complete joke/meaning is carried by the extracted words alone and does not depend on a photo, reaction face, screenshot layout, visual context, or image-specific details. Never rewrite, correct, summarize, or improve the text."},{role:"user",content:`Extracted text (preserve exactly):\\n${text}`} ]})});
       const data:any=await response.json().catch(()=>({}));
-      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});if(response.status===429||response.status===401||response.status>=500)continue;break;}
+      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,credential.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});if(response.status===429||response.status===401||response.status>=500)continue;break;}
       const parsed=JSON.parse(data.choices?.[0]?.message?.content||"{}");
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
       return {suitable:parsed.suitable===true,reason:String(parsed.reason||"No explanation provided.").slice(0,500)};
