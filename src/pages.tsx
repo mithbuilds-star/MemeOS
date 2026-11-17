@@ -457,21 +457,7 @@ export function Pipeline() {
       <div className="panel-head"><div><h3>Not finished</h3><p>Each item and why it is not done yet. Retry one or all.</p></div><span className="tag">{data?.items?.length??0} ITEMS</span></div>
       {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>WHY</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small>{m.why}</small></td><td>{m.processing_attempts??0} <small>{m.processing_same_error_count??0}/3 same · {m.processing_consecutive_errors??0}/5 total errors</small></td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button><button className="btn secondary small" style={{marginLeft:6}} disabled={busy===m.id} onClick={()=>{if(!confirm("Discard this item? It will not be retried."))return;discardOne(m.id)}}><X size={14}/> Discard</button></td></tr>)}</tbody></table></div>}
     </div>
-    <div className="panel" style={{marginTop:18}}>
-      <div className="panel-head"><div><h3>Where everything goes</h3><p>Live counts for every stage and terminal outcome. Updates with the pipeline every 15 seconds.</p></div><span className="tag">{data?.total??0} TOTAL ITEMS</span></div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:10,alignItems:"stretch"}}>
-        {(data?.flow||[]).map((stage:any)=><button key={stage.key} type="button" onClick={()=>{window.location.href="/pipeline/"+stage.key}} style={{textAlign:"left",border:"1px solid var(--border, #333)",borderRadius:12,padding:14,minWidth:0,background:"var(--panel, transparent)",color:"inherit",cursor:"pointer",font:"inherit"}}>
-          <div style={{fontSize:11,letterSpacing:".08em",textTransform:"uppercase",opacity:.65,minHeight:28}}>{stage.label}</div>
-          <div style={{fontSize:28,fontWeight:700,lineHeight:1.2,fontVariantNumeric:"tabular-nums"}}>{stage.count}</div>
-          <div style={{fontSize:11,opacity:.65,marginTop:6,lineHeight:1.4}}>{stage.detail}</div>
-          <div style={{fontSize:11,fontWeight:600,marginTop:12,color:"var(--accent, #a78bfa)"}}>View memes →</div>
-        </button>)}
-      </div>
-      <div style={{marginTop:14,fontSize:12,opacity:.7}}>Select any stage to open its meme list. Approval, scheduled and published counts are destination assignments, so a meme can appear more than once when sent to multiple accounts.</div>
-      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
-        {(data?.flow||[]).filter((x:any)=>["rejected","discarded","media_unavailable","low_confidence"].includes(x.key)).map((stage:any)=><span key={stage.key} className="tag">{stage.label}: {stage.count}</span>)}
-      </div>
-    </div>
+    <ActivityLog embedded />
   </>;
 }
 
@@ -499,9 +485,15 @@ export function PipelineStage({ stage }: { stage: string }) {
 }
 
 
-export function ActivityLog() {
+export function ActivityLog({ embedded = false }: { embedded?: boolean }) {
   const [items,setItems]=useState<any[]>([]);const [error,setError]=useState("");const [loading,setLoading]=useState(true);
   const load=()=>api("/activity").then(r=>{setItems(r.logs||[]);setError("");}).catch((e:any)=>setError(e.message)).finally(()=>setLoading(false));
   useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer);},[]);
-  return <><PageHead eyebrow="WORKSPACE HISTORY" title="Activity log" desc="Major pipeline events only. Small one-off events are intentionally not recorded." action={<button className="btn secondary" onClick={load}><Activity size={14}/> Refresh</button>}/>{error&&<Notice kind="warn">{error}</Notice>}<div className="panel"><div className="panel-head"><div><h3>Major events</h3><p>Batch events involving at least two memes.</p></div><span className="tag">{items.length} EVENTS</span></div>{loading?<p>Loading activity…</p>:items.length===0?<Empty title="No major activity yet" text="When two or more memes are discovered or processed together, the event will appear here."/>:<div className="table-wrap"><table><thead><tr><th>EVENT</th><th>DETAILS</th><th>TIME</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><b>{String(item.event_type||"event").replace(/_/g," ").toUpperCase()}</b></td><td>{item.message}{item.metadata?.count&&<small>{item.metadata.count} memes</small>}</td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}</div></>;
+  const content=<div className="panel" style={embedded?{marginTop:18}:undefined}>
+    <div className="panel-head"><div><h3>{embedded?"Activity log":"Recent activity"}</h3><p>Major batch events and reconstructed history from existing workspace records.</p></div><div style={{display:"flex",alignItems:"center",gap:10}}><span className="tag">{items.length} EVENTS</span><button className="btn small secondary" onClick={load}><Activity size={13}/> Refresh</button></div></div>
+    {error&&<Notice kind="warn">{error}</Notice>}
+    {loading?<p>Loading activity…</p>:items.length===0?<Empty title="No activity recorded yet" text="New batch events will appear here as the pipeline runs."/>:<div className="table-wrap"><table><thead><tr><th>EVENT</th><th>DETAILS</th><th>TIME</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><b>{String(item.event_type||"event").replace(/_/g," ").toUpperCase()}</b>{item.historical&&<small>HISTORICAL · RECONSTRUCTED</small>}</td><td>{item.message}{item.metadata?.count!=null&&<small>{item.metadata.count} items</small>}</td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
+    <div className="panel-foot">Historical entries are reconstructed from saved discovery, meme and assignment records. They are summaries, not a verbatim event-by-event audit trail.</div>
+  </div>;
+  return embedded?content:<><PageHead eyebrow="WORKSPACE HISTORY" title="Activity log" desc="Major pipeline events and available historical summaries."/>{content}</>;
 }
