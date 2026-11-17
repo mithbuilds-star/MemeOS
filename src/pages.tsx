@@ -241,10 +241,9 @@ export function Scheduler() {
       ["21:00","22:00","20:00","19:00","18:00","17:00","15:00","14:00","12:00","11:00"]
     ];
     const now=new Date();
-    const booked=items.filter(i=>i.scheduled_at&&String(i.scheduled_at).slice(0,10)===date);
+    const booked=items.filter(i=>i.scheduled_at&&new Date(i.scheduled_at).toLocaleDateString("en-CA")===date);
     const used=new Set(booked.map(i=>{const d=new Date(i.scheduled_at);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}));
-    const alreadyAuto=booked.filter(i=>i.auto_scheduled).length;
-    const remaining=Math.max(0,postsPerDay-alreadyAuto);
+    const remaining=Math.max(0,postsPerDay-booked.length);
     return ranked[day].slice().sort().filter(t=>new Date(date+"T"+t+":00").getTime()>now.getTime()+60000&&!used.has(t)).slice(0,remaining);
   };
   const toggleAuto=async()=>{
@@ -254,10 +253,10 @@ export function Scheduler() {
       if(!autoPost){
         const date=localDate();
         const slots=bestTimes(date);
-        const alreadyAuto=items.filter(i=>i.auto_scheduled&&i.scheduled_at&&String(i.scheduled_at).slice(0,10)===date).length;
+        const alreadyScheduledToday=items.filter(i=>i.scheduled_at&&new Date(i.scheduled_at).toLocaleDateString("en-CA")===date).length;
         const queue=items.filter(i=>i.approval_status==="approved"&&!i.scheduled_at&&!["published","rejected","failed","needs_review"].includes(i.status)).slice(0,slots.length);
-        if(!slots.length&&alreadyAuto<postsPerDay)throw new Error("Today's recommended posting windows have passed. Try again tomorrow.");
-        if(slots.length&&!queue.length&&alreadyAuto<postsPerDay)throw new Error("No approved unscheduled posts are available for today's remaining slots.");
+        if(!slots.length&&alreadyScheduledToday<postsPerDay)throw new Error("Today's recommended posting windows have passed. Try again tomorrow.");
+        if(slots.length&&!queue.length&&alreadyScheduledToday<postsPerDay)throw new Error("No approved unscheduled posts are available for today's remaining slots.");
         if(slots.length&&queue.length){
           const scheduledAt=slots.slice(0,queue.length).map(t=>new Date(date+"T"+t+":00").toISOString());
           await api("/scheduler/auto-fill",{method:"POST",body:JSON.stringify({assignment_ids:queue.map(i=>i.id),scheduled_at:scheduledAt})});
