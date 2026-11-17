@@ -1,0 +1,34 @@
+name: convert-existing-png-assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type CONVERT to convert all PNGs in meme-assets to JPEG and update meme references
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    if: ${{ inputs.confirm == 'CONVERT' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install renderer dependencies
+        working-directory: render
+        run: npm install --no-audit --no-fund
+      - name: Convert stored PNGs and update references
+        working-directory: render
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: node convert-png-assets.mjs
