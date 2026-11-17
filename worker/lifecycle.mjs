@@ -6,7 +6,7 @@
 // written on claim; every later write must match it (compare-and-set).
 
 export const DEFAULTS = {
-  maxAttempts: 3,
+  maxAttempts: 5, // hard ceiling; same-error threshold below may discard earlier
   attemptTimeoutMs: 120_000,       // per-attempt OCR/classify timeout
   renderWatchdogMs: 30 * 60_000,   // how long a dispatched GitHub render may run
   backoffBaseMs: 60_000,           // retry_wait backoff: base * 2^(attempt-1), capped
@@ -60,24 +60,26 @@ export function backoffMs(attempt, cfg = DEFAULTS) {
 // attempt = attempts already recorded + 1.
 export function failureOutcome(row, message, nowMs, cfg = DEFAULTS) {
   const attempt = Number(row.processing_attempts || 0) + 1;
+  const error = String(message || "Unknown error").trim().replace(/\\s+/g, " ").slice(0, 500);
+  const key = error.toLowerCase();
+  const consecutive = Number(row.processing_consecutive_errors || 0) + 1;
+  const same = key && key === String(row.processing_last_error_key || "") 
+    ? Number(row.processing_same_error_count || 0) + 1 : 1;
+  const terminal = same >= 3 || consecutive >= 5;
   const base = {
     processing_attempts: attempt,
-    processing_error: String(message || "Unknown error").slice(0, 500),
+    processing_consecutive_errors: consecutive,
+    processing_same_error_count: same,
+    processing_last_error_key: key,
+    processing_error: error,
     processing_locked_until: null,
     processing_token: null,
   };
-  if (attempt >= cfg.maxAttempts) {
-    // Terminal: automatically discarded from processing after the configured attempts; original record/media remain.
-    return { ...base, processing_status: "discarded", processing_next_retry_at: null, processing_failed_at: new Date(nowMs).toISOString(), _terminal: true, _attempt: attempt };
+  if (terminal) {
+    return { ...base, processing_status: "discarded", reel_status: row.reel_status === "rendering" || row.reel_status === "render_failed" ? "discarded" : row.reel_status, processing_next_retry_at: null, reel_render_next_retry_at: null, reel_render_locked_until: null, processing_failed_at: new Date(nowMs).toISOString(), _terminal: true, _attempt: attempt };
   }
-  // Non-terminal: the status is deliberately not written. A step may already have advanced
-  // it in the database, and writing a stale value would regress the job.
-  return {
-    ...base,
-    processing_next_retry_at: new Date(nowMs + backoffMs(attempt, cfg)).toISOString(),
-    _terminal: false,
-    _attempt: attempt,
-  };
+  // Keep the current stage: a failed step retries at the same point without regressing progress.
+  return { ...base, processing_next_retry_at: new Date(nowMs + backoffMs(consecutive, cfg)).toISOString(), _terminal: false, _attempt: attempt };
 }
 
 // A dispatched GitHub render is "in flight": keep it out of the queue until the watchdog.
@@ -91,7 +93,8 @@ export function renderDispatchPatch(row, nowMs, cfg = DEFAULTS) {
 }
 
 export function shouldFailRender(row, cfg = DEFAULTS) {
-  return Number(row.processing_attempts || 0) >= cfg.maxAttempts;
+  // Dispatches are not failures. Only recorded consecutive errors can exhaust a render.
+  return Number(row.processing_consecutive_errors || 0) >= 5;
 }
 
 // Recovery: a lease that expired without renewal means the worker is gone.
