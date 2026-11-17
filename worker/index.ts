@@ -428,13 +428,13 @@ async function runBackgroundProcessing(env:Env){
 async function runWaitingReels(env:Env){
   const nowIso=new Date().toISOString();
   // Watchdog: a dispatched render that never reported back is a failed attempt, counted and retried with backoff.
-  const stuck=await db(env,"memes",`?reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}&select=*&limit=3`);
+  const stuck=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}&select=*&limit=3`);
   for(const m of stuck){
     const ctx:Ctx={userId:m.owner_id,token:""};
     const msg="The GitHub render did not report back within 30 minutes.";
     const {_terminal,_attempt,...patch}=L.failureOutcome(m,msg,Date.now());
     const body:any={...patch,reel_status:_terminal?"discarded":"render_failed",reel_render_next_retry_at:_terminal?null:patch.processing_next_retry_at,reel_render_locked_until:null,processing_error:msg,...(_terminal?{processing_status:"discarded",processing_failed_at:nowIso}:{})};
-    const rows=await db(env,"memes",`?id=eq.${encodeURIComponent(m.id)}&${userFilter(ctx)}&reel_status=eq.rendering`,{method:"PATCH",body:JSON.stringify(body)});
+    const rows=await db(env,"memes",`?id=eq.${encodeURIComponent(m.id)}&${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=eq.rendering`,{method:"PATCH",body:JSON.stringify(body)});
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
   const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_consecutive_errors,processing_same_error_count,processing_last_error_key,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
@@ -1067,7 +1067,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       const rows: any[] = await db(env,"memes",`?${userFilter(ctx)}&${g.filter}&select=id`,{method:"PATCH",body:JSON.stringify({...reset,processing_status:g.status})});
       requeued += rows.length;
     }
-    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_locked_until:null,reel_render_next_retry_at:new Date().toISOString(),processing_error:null})});
+    const reelRows: any[] = await db(env,"memes",`?${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=in.(render_failed,renderer_not_configured)&select=id`,{method:"PATCH",body:JSON.stringify({reel_status:"render_failed",reel_render_locked_until:null,reel_render_next_retry_at:new Date().toISOString(),processing_error:null})});
     return json({requeued,reel_requeued:reelRows.length});
   }
 
