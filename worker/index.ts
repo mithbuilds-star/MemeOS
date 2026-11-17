@@ -185,8 +185,15 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     items.push(...page);
     if(page.length<1000)break;
   }
-  // Import the full date-filtered dataset; source_post_id deduplication handles overlaps.
-  const batch=items;
+  // Backfill runs are bounded by the oldest post in the incremental result.
+  // The official Apify actor has no onlyPostsOlderThan input, so enforce the
+  // cutoff locally after fetching its maximum timeline; compatible custom actors
+  // can also apply the same cutoff server-side.
+  const backfillBefore=job.metadata?.phase==="backfill"&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
+  const batch=backfillBefore?items.filter((item:any)=>{
+    const postedAt=normalizeApifyItem(item).postedAt;
+    return !!postedAt&&Date.parse(postedAt)<backfillBefore;
+  }):items;
   let inserted = 0, skipped = 0, failedMedia = 0;
   for (const item of batch) {
     const n = normalizeApifyItem(item);
@@ -615,7 +622,11 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
     const parsed=new Date(olderThan);
     if(!Number.isNaN(parsed.getTime())){
       delete result.onlyPostsNewerThan;
-      result.onlyPostsOlderThan=parsed.toISOString().replace(/\.\d{3}Z$/,"Z");
+      // The official apify/instagram-scraper actor exposes onlyPostsNewerThan,
+      // not onlyPostsOlderThan. For it, fetch the maximum timeline and enforce
+      // the historical cutoff against each returned post during import.
+      if(actorId!==DEFAULT_APIFY_ACTOR)result.onlyPostsOlderThan=parsed.toISOString().replace(/\.\d{3}Z$/,"Z");
+      else delete result.onlyPostsOlderThan;
     }
   }
   return result;
