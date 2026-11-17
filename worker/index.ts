@@ -573,7 +573,7 @@ async function connectMetaSystemUserToken(env: Env, ctx: Ctx, accountId: string,
     if (assetRes.ok) {
       const assetUsername = String(asset.ig_username || "").replace(/^@/, "").toLowerCase();
       const igUserId = String(asset.ig_user_id || "");
-      if (assetUsername === expectedUsername && /^\\d{5,30}$/.test(igUserId)) {
+      if (assetUsername === expectedUsername && /^\d{5,30}$/.test(igUserId)) {
         selected = {
           id: igUserId,
           username: assetUsername,
@@ -596,7 +596,7 @@ async function connectMetaSystemUserToken(env: Env, ctx: Ctx, accountId: string,
     if (userRes.ok) {
       const userUsername = String(user.username || "").replace(/^@/, "").toLowerCase();
       const userId = String(user.id || "");
-      if (userUsername === expectedUsername && /^\\d{5,30}$/.test(userId)) {
+      if (userUsername === expectedUsername && /^\d{5,30}$/.test(userId)) {
         selected = {
           id: userId,
           username: userUsername,
