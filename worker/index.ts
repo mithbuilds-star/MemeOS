@@ -150,7 +150,7 @@ async function apifyRequestWithFallback(env:Env,ctx:Ctx,url:string){
   for(const credential of creds){
     try{
       const secret=await decryptSecret(env,credential);
-      const response=await fetch(url,{...init,headers:{...(init.headers||{}),Authorization:`Bearer ${secret}`}});
+      const response=await fetch(url,{...init,headers:{...(init.headers||{}),Authorization:`Bearer ${secret}`},signal:init.signal||AbortSignal.timeout(20000)});
       if(!response.ok){
         const data:any=await response.clone().json().catch(()=>({}));
         lastError=data.error?.message||`Apify returned ${response.status}.`;
@@ -175,7 +175,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
   const credential=rows?.[0];
   if(!credential)throw new Error("The Apify key that started this discovery run is no longer available. Re-enable or replace that exact key.");
   const secret=await decryptSecret(env,credential);
-  const response=await fetch(url,{headers:{Authorization:`Bearer ${secret}`}});
+  const response=await fetch(url,{headers:{Authorization:`Bearer ${secret}`},signal:AbortSignal.timeout(20000)});
   if(!response.ok){
     const data:any=await response.clone().json().catch(()=>({}));
     const message=data.error?.message||`Apify returned ${response.status} while checking the original discovery run.`;
@@ -631,7 +631,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         :buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,source.last_scraped_at||null);
       // Hard-cap runtime and billable results. Historical filtering may page past newer posts.
       const runTimeoutSeconds=phase==="backfill"?900:600;
-      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=${runTimeoutSeconds}&maxItems=${SCRAPE_BATCH}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=${runTimeoutSeconds}&maxItems=${SCRAPE_BATCH}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
         lastError=result.error?.message||`Apify returned ${response.status}.`;
