@@ -437,7 +437,7 @@ async function runWaitingReels(env:Env){
     const rows=await db(env,"memes",`?id=eq.${encodeURIComponent(m.id)}&${userFilter(ctx)}&reel_status=eq.rendering`,{method:"PATCH",body:JSON.stringify(body)});
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
-  const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
+  const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_consecutive_errors,processing_same_error_count,processing_last_error_key,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
   const auto=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
   const manual=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
   const pending=[...auto,...manual].slice(0,10);
@@ -1051,9 +1051,9 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     // Only active, non-terminal pipeline stages can be retried. Error streak counters are deliberately preserved.
     const reset = { processing_attempts:0, processing_error:null, processing_next_retry_at:null, processing_locked_until:null, reel_render_locked_until:null, reel_render_next_retry_at:null };
     const groups = [
-      { filter:"processing_status=eq.needs_ocr&extracted_text=is.null", status:"needs_ocr" },
-      { filter:"processing_status=in.(ocr_complete,ready_for_asset)&extracted_text=not.is.null&classification=eq.suitable", status:"ready_for_asset" },
-      { filter:"processing_status=eq.ocr_complete&extracted_text=not.is.null&classification=neq.suitable", status:"ocr_complete" },
+      { filter:"processing_status=in.(needs_ocr,failed,processing_failed)&extracted_text=is.null", status:"needs_ocr" },
+      { filter:"processing_status=in.(ocr_complete,ready_for_asset,failed,processing_failed)&extracted_text=not.is.null&classification=eq.suitable", status:"ready_for_asset" },
+      { filter:"processing_status=in.(ocr_complete,failed,processing_failed)&extracted_text=not.is.null&classification=neq.suitable", status:"ocr_complete" },
     ];
     let requeued = 0;
     for (const g of groups) {
