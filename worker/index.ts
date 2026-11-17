@@ -588,7 +588,7 @@ async function refreshCredentialUsage(env:Env,ctx:Ctx,row:any){
   if(row.provider==="apify"){
     const response=await fetch("https://api.apify.com/v2/users/me/limits",{headers:{Authorization:`Bearer ${secret}`}});
     const data:any=await response.json().catch(()=>({}));
-    if(!response.ok)throw new Error(data.error?.message||`Apify usage lookup failed (${response.status}).`);
+    if(!response.ok){await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,row.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:refreshedAt})});throw new Error(data.error?.message||`Apify usage lookup failed (${response.status}).`);}
     const d=data.data||{};
     snapshot={provider:"apify",refreshed_at:refreshedAt,usage:{used_usd:d.current?.monthlyUsageUsd??null,limit_usd:d.limits?.maxMonthlyUsageUsd??null,used_compute_units:d.current?.monthlyActorComputeUnits??null,limit_compute_units:d.limits?.maxMonthlyActorComputeUnits??null,cycle_start:d.monthlyUsageCycle?.startAt??null,cycle_end:d.monthlyUsageCycle?.endAt??null}};
   }else if(row.provider==="groq"){
@@ -597,7 +597,7 @@ async function refreshCredentialUsage(env:Env,ctx:Ctx,row:any){
     const h=response.headers;
     const numberHeader=(name:string)=>{const value=h.get(name);if(value===null)return null;const n=Number(value);return Number.isFinite(n)?n:null;};
     const limited=response.status===429||numberHeader("x-ratelimit-remaining-requests")===0||numberHeader("x-ratelimit-remaining-tokens")===0;
-    if(!response.ok&&response.status!==429)throw new Error(`Groq usage check failed (${response.status}): ${(await response.text()).slice(0,180)}`);
+    if(response.status===401||response.status===403){await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:refreshedAt})});throw new Error("Groq rejected this API key. Check it in API Manager.");}if(!response.ok&&response.status!==429)throw new Error(`Groq usage check failed (${response.status}): ${(await response.text()).slice(0,180)}`);
     snapshot={provider:"groq",refreshed_at:refreshedAt,rate_limited:limited,request_limit:numberHeader("x-ratelimit-limit-requests"),request_remaining:numberHeader("x-ratelimit-remaining-requests"),request_reset:h.get("x-ratelimit-reset-requests"),token_limit:numberHeader("x-ratelimit-limit-tokens"),token_remaining:numberHeader("x-ratelimit-remaining-tokens"),token_reset:h.get("x-ratelimit-reset-tokens"),retry_after:h.get("retry-after"),http_status:response.status};
   }else return null;
   const limited=row.provider==="groq"&&snapshot.rate_limited;
