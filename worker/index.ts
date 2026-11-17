@@ -242,12 +242,12 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
         return !!postedAt&&Date.parse(postedAt)>incrementalCursor!;
       })
       :items;
-  let inserted = 0, skipped = items.length-batch.length, failedMedia = 0;
+  let inserted=0,skipped=items.length-batch.length,failedMedia=0,duplicates=0,invalidIds=0,insertErrors=0;
   for (const item of batch) {
     const n = normalizeApifyItem(item);
-    if (!n.postId) { skipped++; continue; }
+    if (!n.postId) { skipped++; invalidIds++; continue; }
     const exists = await db(env,"memes",`?${userFilter(ctx)}&source_post_id=eq.${encodeURIComponent(n.postId)}&select=id`);
-    if (exists.length) { skipped++; continue; }
+    if (exists.length) { skipped++; duplicates++; continue; }
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
       try {
@@ -266,7 +266,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     }
     const src = await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent((n.username||"").replace(/^@/,""))}&select=id`);
     const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:n.postId,source_permalink:n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl};
-    try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch { skipped++; }
+    try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch (error:any) { skipped++; insertErrors++; console.error("Discovery meme insert failed",n.postId,String(error?.message||error)); }
   }
   const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];
   const isBackfill=job.metadata?.phase==="backfill";
@@ -314,9 +314,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       for(const row of sourceRows)await db(env,"reference_accounts",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});
     }
   }
-  await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia}})});
+  await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,items_eligible:batch.length,inserted,skipped,duplicates,invalid_ids:invalidIds,insert_errors:insertErrors,failed_media:failedMedia}})});
   await refreshAllCredentialUsage(env,ctx);
-  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames,phase:isBackfill?"backfill":"incremental"});
+  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${items.length}, imported ${inserted}, duplicates ${duplicates}, invalid IDs ${invalidIds}, insert errors ${insertErrors}, media unavailable ${failedMedia}.`,inserted,{items_seen:items.length,items_eligible:batch.length,inserted,skipped,duplicates,invalid_ids:invalidIds,insert_errors:insertErrors,failed_media:failedMedia,source_usernames:sourceNames,phase:isBackfill?"backfill":"incremental"});
   return {done:true,status:"SUCCEEDED",items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia};
 }
 
@@ -1243,7 +1243,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     return json({assignments:rows});
   }
 
-  if(p==="/discovery/jobs"&&method==="GET") return json({jobs:await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&select=*&order=created_at.desc&limit=30`)});
+  if(p==="/discovery/jobs"&&method==="GET"){const jobs=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&select=*&order=created_at.desc&limit=30`);const allRuns=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&select=id`);return json({jobs,total_runs:allRuns.length});}
   const pollMatch=p.match(/^\/discovery\/jobs\/([0-9a-f-]+)\/poll$/);
   if(pollMatch&&method==="POST"){
     const rows=await db(env,"jobs",`?id=eq.${pollMatch[1]}&${userFilter(ctx)}&select=*`); if(!rows.length)return fail("Discovery job not found.",404);
