@@ -778,7 +778,26 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const body = method === "GET" || method === "DELETE" ? {} : await req.json().catch(() => ({})) as any;
 
   if(p==="/activity"&&method==="GET"){
-    const logs=await db(env,"activity_logs",`?${userFilter(ctx)}&select=id,event_type,message,metadata,created_at&order=created_at.desc&limit=100`);
+    const [saved,jobs,memes,assignments,publishing]=await Promise.all([
+      db(env,"activity_logs",`?${userFilter(ctx)}&select=id,event_type,message,metadata,created_at&order=created_at.desc&limit=300`),
+      db(env,"jobs",`?${userFilter(ctx)}&select=id,job_type,status,created_at,started_at,completed_at,last_error&order=created_at.desc&limit=1000`),
+      db(env,"memes",`?${userFilter(ctx)}&select=id,source_type,processing_status,classification,created_at&order=created_at.desc&limit=5000`),
+      db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=id,approval_status,status,created_at&order=created_at.desc&limit=5000`),
+      db(env,"publishing_history",`?${userFilter(ctx)}&select=id,status,published_at,created_at,error_message,permalink&order=created_at.desc&limit=1000`)
+    ]);
+    const firstLiveLog=saved.length?Math.min(...saved.map((x:any)=>new Date(x.created_at).getTime()).filter(Number.isFinite)):Infinity;
+    const historical:any[]=[];
+    const dayKey=(value:string)=>new Date(value).toISOString().slice(0,10);
+    const includeBeforeLive=(value:string|null|undefined)=>!!value&&new Date(value).getTime()<firstLiveLog;
+    const memeDays=new Map<string,any>();
+    for(const m of memes){if(!includeBeforeLive(m.created_at))continue;const key=dayKey(m.created_at);const row=memeDays.get(key)||{count:0,sources:{}};row.count++;const source=m.source_type||"unknown";row.sources[source]=(row.sources[source]||0)+1;memeDays.set(key,row);}
+    for(const [day,row] of memeDays){historical.push({id:`history-memes-${day}`,event_type:"historical_intake",message:`${row.count} meme records were added to the workspace.`,metadata:{count:row.count,source_breakdown:row.sources},created_at:`${day}T23:59:59.000Z`,historical:true});}
+    const assignmentDays=new Map<string,any>();
+    for(const a of assignments){if(!includeBeforeLive(a.created_at))continue;const key=dayKey(a.created_at);const row=assignmentDays.get(key)||{count:0,states:{}};row.count++;const state=a.status||a.approval_status||"unknown";row.states[state]=(row.states[state]||0)+1;assignmentDays.set(key,row);}
+    for(const [day,row] of assignmentDays){const summary=Object.entries(row.states).map(([k,v])=>`${k}: ${v}`).join(", ");historical.push({id:`history-assignments-${day}`,event_type:"historical_assignments",message:`${row.count} destination assignments were created. Current status snapshot: ${summary}.`,metadata:{count:row.count,status_breakdown:row.states},created_at:`${day}T23:59:58.000Z`,historical:true});}
+    for(const j of jobs){const at=j.completed_at||j.started_at||j.created_at;if(!includeBeforeLive(at))continue;historical.push({id:`history-job-${j.id}`,event_type:"historical_discovery_run",message:`Discovery run ${j.status||"recorded"}.${j.last_error?` Last error: ${String(j.last_error).slice(0,180)}`:""}`,metadata:{job_type:j.job_type,status:j.status},created_at:at,historical:true});}
+    for(const h of publishing){const at=h.published_at||h.created_at;if(!includeBeforeLive(at))continue;historical.push({id:`history-publish-${h.id}`,event_type:"historical_publishing",message:h.status==="published"?"Instagram post published.":`Publishing attempt recorded: ${h.status||"unknown"}.${h.error_message?` ${String(h.error_message).slice(0,160)}`:""}`,metadata:{status:h.status,permalink:h.permalink},created_at:at,historical:true});}
+    const logs=[...saved,...historical].sort((a:any,b:any)=>new Date(b.created_at).getTime()-new Date(a.created_at).getTime()).slice(0,300);
     return json({logs});
   }
   if (p === "/overview" && method === "GET") {
