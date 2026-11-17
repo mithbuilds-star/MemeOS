@@ -77,7 +77,7 @@ async function decryptSecret(env: Env, row: any): Promise<string> {
 }
 function credentialFailureStatus(status:number,currentStatus?:string){if(status===429)return "rate_limited";if(status===401||status===403)return "error";return currentStatus||"untested";}
 function credentialView(row: any) {
-  return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null),enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at,usage_snapshot:row.usage_snapshot||null,usage_refreshed_at:row.usage_refreshed_at||null};
+  return {id:row.id,provider:row.provider,label:row.label,key_hint:row.key_hint,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null),enabled:row.enabled,status:row.status,last_tested_at:row.last_tested_at,last_used_at:row.last_used_at,created_at:row.created_at,usage_snapshot:row.usage_snapshot||null,usage_refreshed_at:row.usage_refreshed_at||null,auto_disabled_until:row.auto_disabled_until||null,auto_disabled_reason:row.auto_disabled_reason||null};
 }
 
 function userFilter(ctx: Ctx) { return `owner_id=eq.${encodeURIComponent(ctx.userId)}`; }
@@ -510,8 +510,19 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
         lastError=result.error?.message||`Apify returned ${response.status}.`;
-        if(response.status===401||response.status===403)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:new Date().toISOString()})});
-        else if(response.status===429)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+5*60*1000).toISOString(),last_used_at:new Date().toISOString()})});
+        const balanceError=/(using this actor.{0,160}cost|cost.{0,100}over.{0,60}balance|over.{0,60}balance|insufficient.{0,60}balance|not enough.{0,60}(credit|balance)|balance.{0,60}(too low|insufficient))/i.test(lastError);
+        const failedAt=new Date().toISOString();
+        if(balanceError){
+          let limits:any={};
+          try{const lr=await fetch("https://api.apify.com/v2/users/me/limits",{headers:{Authorization:`Bearer ${secret}`}});const lj:any=await lr.json().catch(()=>({}));if(lr.ok)limits=lj.data||{};}catch{}
+          const oldUsage=credential.usage_snapshot?.usage||{};
+          const cycleEnd=limits.monthlyUsageCycle?.endAt||oldUsage.cycle_end||null;
+          const used=limits.current?.monthlyUsageUsd??oldUsage.used_usd??null;
+          const cap=limits.limits?.maxMonthlyUsageUsd??oldUsage.limit_usd??null;
+          const usageSnapshot={provider:"apify",refreshed_at:failedAt,usage:{used_usd:used,limit_usd:cap,used_compute_units:limits.current?.monthlyActorComputeUnits??oldUsage.used_compute_units??null,limit_compute_units:limits.limits?.maxMonthlyActorComputeUnits??oldUsage.limit_compute_units??null,cycle_start:limits.monthlyUsageCycle?.startAt||oldUsage.cycle_start||null,cycle_end:cycleEnd},limit_reached:true,balance_error:lastError};
+          await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({enabled:false,status:"limit_reached",auto_disabled_reason:"actor_cost_exceeds_balance",auto_disabled_until:cycleEnd,usage_snapshot:usageSnapshot,usage_refreshed_at:failedAt,last_used_at:failedAt,cooldown_until:null})});
+        }else if(response.status===401||response.status===403)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:failedAt})});
+        else if(response.status===429)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+5*60*1000).toISOString(),last_used_at:failedAt})});
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
@@ -590,7 +601,21 @@ async function refreshCredentialUsage(env:Env,ctx:Ctx,row:any){
     const data:any=await response.json().catch(()=>({}));
     if(!response.ok){await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,row.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:refreshedAt})});throw new Error(data.error?.message||`Apify usage lookup failed (${response.status}).`);}
     const d=data.data||{};
-    snapshot={provider:"apify",refreshed_at:refreshedAt,usage:{used_usd:d.current?.monthlyUsageUsd??null,limit_usd:d.limits?.maxMonthlyUsageUsd??null,used_compute_units:d.current?.monthlyActorComputeUnits??null,limit_compute_units:d.limits?.maxMonthlyActorComputeUnits??null,cycle_start:d.monthlyUsageCycle?.startAt??null,cycle_end:d.monthlyUsageCycle?.endAt??null}};
+    const used=Number(d.current?.monthlyUsageUsd),limit=Number(d.limits?.maxMonthlyUsageUsd);
+    const cycleEnd=d.monthlyUsageCycle?.endAt||null;
+    const exhausted=Number.isFinite(used)&&Number.isFinite(limit)&&limit>=0&&used>=limit;
+    const previousCycleEnd=row.usage_snapshot?.usage?.cycle_end||null;
+    const cycleRolled=!!(previousCycleEnd&&cycleEnd&&previousCycleEnd!==cycleEnd&&Date.parse(cycleEnd)>Date.now());
+    const shouldReenable=row.auto_disabled_reason&&cycleRolled&&!exhausted;
+    snapshot={provider:"apify",refreshed_at:refreshedAt,usage:{used_usd:d.current?.monthlyUsageUsd??null,limit_usd:d.limits?.maxMonthlyUsageUsd??null,used_compute_units:d.current?.monthlyActorComputeUnits??null,limit_compute_units:d.limits?.maxMonthlyActorComputeUnits??null,cycle_start:d.monthlyUsageCycle?.startAt??null,cycle_end:cycleEnd},limit_reached:exhausted};
+    if(exhausted){
+      await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({enabled:false,status:"limit_reached",auto_disabled_reason:"apify_monthly_limit",auto_disabled_until:cycleEnd,usage_snapshot:snapshot,usage_refreshed_at:refreshedAt,last_used_at:refreshedAt,cooldown_until:null})});
+      return snapshot;
+    }
+    if(shouldReenable){
+      await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({enabled:true,status:"connected",auto_disabled_reason:null,auto_disabled_until:null,usage_snapshot:snapshot,usage_refreshed_at:refreshedAt,last_used_at:refreshedAt,cooldown_until:null})});
+      return snapshot;
+    }
   }else if(row.provider==="groq"){
     // Rate-limit headers are returned on inference responses, not reliably by /models.
     const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",messages:[{role:"user",content:"Reply with OK."}],max_completion_tokens:1,temperature:0})});
@@ -609,6 +634,11 @@ async function refreshAllCredentialUsage(env:Env,ctx:Ctx){
   const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&enabled=eq.true&select=*`);
   for(const credential of credentials){try{await refreshCredentialUsage(env,ctx,credential);}catch(error:any){console.error("Credential usage refresh failed",credential.provider,credential.label,String(error?.message||error));}}
 }
+async function refreshDueApifyKeys(env:Env,ctx:Ctx){
+  const now=new Date().toISOString();
+  const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.false&auto_disabled_reason=not.is.null&auto_disabled_until=lte.${encodeURIComponent(now)}&select=*`);
+  for(const credential of credentials){try{await refreshCredentialUsage(env,ctx,credential);}catch(error:any){console.error("Apify cycle reset check failed",credential.label,String(error?.message||error));}}
+}
 
 async function runScheduledDiscovery(env:Env){
   const active=await db(env,"instagram_accounts","?discovery_enabled=eq.true&select=owner_id");
@@ -616,6 +646,7 @@ async function runScheduledDiscovery(env:Env){
   for(const ownerId of owners){
     const ctx:Ctx={userId:ownerId,token:""};
     const settingsRows=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,discovery_interval_minutes,last_discovery_started_at,last_usage_refresh_date`);
+    await refreshDueApifyKeys(env,ctx);
     const settings=settingsRows[0]||{};
     const indiaDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
     if(settings.last_usage_refresh_date!==indiaDate){
@@ -1297,7 +1328,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     return json({status:"ok",automation:{paused:!!settings[0]?.global_paused,auto_process_enabled:settings[0]?.auto_process_enabled!==false,active_jobs:jobs.length},integrations:[{name:"Supabase",status:"Configured"},{name:"Apify",status:count("apify")?`${count("apify")} key(s) in API Manager`:"Needs setup"},{name:"Groq",status:count("groq")?`${count("groq")} key(s) in API Manager`:"Needs setup"},{name:"Meta",status:env.META_APP_ID&&env.META_APP_SECRET?"Credentials set":"Needs configuration"},{name:"Workers AI OCR",status:env.AI?"Server-side OCR available":"AI binding missing"},{name:"BRAT render service",status:renderStatus}]});
   }
   if(p==="/api-credentials"&&method==="GET"){
-    const rows=await db(env,"api_credentials",`?${userFilter(ctx)}&select=id,provider,label,key_hint,actor_id,actor_input,enabled,status,last_tested_at,last_used_at,created_at,usage_snapshot,usage_refreshed_at&order=created_at.desc`);
+    const rows=await db(env,"api_credentials",`?${userFilter(ctx)}&select=id,provider,label,key_hint,actor_id,actor_input,enabled,status,last_tested_at,last_used_at,created_at,usage_snapshot,usage_refreshed_at,auto_disabled_until,auto_disabled_reason&order=created_at.desc`);
     return json({credentials:rows.map((row:any)=>({...row,actor_id:row.actor_id||(row.provider==="apify"?DEFAULT_APIFY_ACTOR:null)}))});
   }
   if(p==="/api-credentials"&&method==="POST"){
@@ -1319,7 +1350,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   if(credentialMatch&&method==="PATCH"){
     const rows=await db(env,"api_credentials",`?id=eq.${credentialMatch[1]}&${userFilter(ctx)}&select=*`);
     if(!rows.length)return fail("API key not found.",404);
-    const patch:any={}; if(typeof body.enabled==="boolean")patch.enabled=body.enabled;
+    const patch:any={}; if(typeof body.enabled==="boolean"){const lockedUntil=rows[0].auto_disabled_until;if(body.enabled&&rows[0].auto_disabled_reason&&lockedUntil&&Date.parse(lockedUntil)>Date.now())return fail("This Apify key is paused until its usage cycle ends.",409);patch.enabled=body.enabled;if(body.enabled){patch.auto_disabled_until=null;patch.auto_disabled_reason=null;}}
     if(body.label!==undefined)patch.label=String(body.label).trim().slice(0,60);
     if(body.actor_id!==undefined&&rows[0].provider==="apify")patch.actor_id=String(body.actor_id).trim();
     if(body.actor_input!==undefined&&rows[0].provider==="apify"){try{const input=typeof body.actor_input==="string"?JSON.parse(body.actor_input||"{}"):body.actor_input;if(!input||typeof input!=="object"||Array.isArray(input))return fail("Actor input must be a JSON object.");patch.actor_input=input;}catch{return fail("Actor input must be valid JSON.");}}
