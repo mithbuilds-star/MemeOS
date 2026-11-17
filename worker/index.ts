@@ -734,11 +734,12 @@ async function publishAssignment(env: Env, item: { id: string; owner_id: string 
     db(env, "publishing_history", "", { method: "POST", body: JSON.stringify({ owner_id: item.owner_id, ...row }) }).catch(() => {});
   let assignmentRow: any = null;
   try {
-    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url,social_caption),instagram_accounts(id,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at,meta_api_host,meta_token_type)`);
+    const rows: any[] = await db(env, "account_meme_assignments", `?id=eq.${item.id}&${userFilter(ctx)}&select=id,meme_id,destination_account_id,memes(id,output_format,asset_url,reel_asset_url,social_caption),instagram_accounts(id,posting_enabled,meta_user_id,meta_access_token_enc,meta_access_token_iv,meta_token_expires_at,meta_api_host,meta_token_type)`);
     assignmentRow = rows?.[0];
     if (!assignmentRow) throw new Error("Scheduled assignment no longer exists.");
     const account = assignmentRow.instagram_accounts;
     const meme = assignmentRow.memes;
+    if (account?.posting_enabled === false) { await setAssignment({status:"scheduled",publishing_locked_until:null,publishing_started_at:null}); return; }
     if (!account?.meta_access_token_enc || !account?.meta_user_id) throw new Error("This account is not connected to Instagram. Reconnect it in Accounts.");
     if (account.meta_token_expires_at && new Date(account.meta_token_expires_at).getTime() < Date.now()) throw new Error("The Meta token has expired. Reconnect this account.");
 
@@ -843,11 +844,11 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     ]);
     return json({ accounts:a.length, memes:m.length, pending:q.length, published:pub.length, scheduled:sched.length });
   }
-  if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,owner_id,instagram_account_id,username,display_name,account_type,connection_status,token_expires_at,discovery_enabled,created_at,updated_at,meta_user_id,meta_token_expires_at,meta_token_refreshed_at,meta_token_refresh_error,profile_picture_url,meta_token_type,meta_api_host&order=created_at.desc`) });
+  if (p === "/accounts" && method === "GET") return json({ accounts: await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,owner_id,instagram_account_id,username,display_name,account_type,connection_status,token_expires_at,discovery_enabled,posting_enabled,created_at,updated_at,meta_user_id,meta_token_expires_at,meta_token_refreshed_at,meta_token_refresh_error,profile_picture_url,meta_token_type,meta_api_host&order=created_at.desc`) });
   if (p === "/accounts" && method === "POST") {
     const username = String(body.username || "").trim().replace(/^@/,"").toLowerCase();
     if (!/^[a-z0-9._]{1,30}$/.test(username)) return fail("Enter a valid Instagram username.");
-    const rows = await db(env,"instagram_accounts","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,username,connection_status:"not_connected",discovery_enabled:true})});
+    const rows = await db(env,"instagram_accounts","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,username,connection_status:"not_connected",discovery_enabled:true,posting_enabled:true})});
     return json({ account:rows?.[0] },201);
   }
   const metaConnect=p.match(/^\/accounts\/([0-9a-f-]+)\/meta-connect$/);
@@ -866,6 +867,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if (!await owned(env,"instagram_accounts",accountMatch[1],ctx)) return fail("Account not found.",404);
     const allowed: any = {};
     if (typeof body.discovery_enabled === "boolean") allowed.discovery_enabled = body.discovery_enabled;
+    if (typeof body.posting_enabled === "boolean") allowed.posting_enabled = body.posting_enabled;
     if (body.display_name !== undefined) allowed.display_name = String(body.display_name).slice(0,100);
     const rows = await db(env,"instagram_accounts",`?id=eq.${accountMatch[1]}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(allowed)});
     return json({account:rows?.[0]});
@@ -1279,9 +1281,11 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const row=rows[0];const secret=await decryptSecret(env,row);let response:Response;
     if(row.provider==="apify")response=await fetch("https://api.apify.com/v2/users/me",{headers:{Authorization:`Bearer ${secret}`}});
     else response=await fetch("https://api.groq.com/openai/v1/models",{headers:{Authorization:`Bearer ${secret}`}});
-    const ok=response.ok;const detail=ok?(row.provider==="apify"?"Apify API key authenticated.":"Groq API key authenticated."):((await response.text()).slice(0,180)||`Provider returned ${response.status}.`);
-    await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:ok?"connected":response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_tested_at:new Date().toISOString()})});
-    return json({ok,message:detail},ok?200:400);
+    const ok=response.ok,rateLimited=response.status===429,temporaryFailure=response.status>=500;
+    const detail=ok?(row.provider==="apify"?"Apify API key authenticated.":"Groq API key authenticated."):rateLimited?"Provider rate-limited this test. The key remains marked connected; try again later.":temporaryFailure?"Provider is temporarily unavailable. The saved key status was left unchanged.":((await response.text()).slice(0,180)||`Provider returned ${response.status}.`);
+    const status=ok||rateLimited?"connected":temporaryFailure?(row.status==="connected"?"connected":row.status||"untested"):"error";
+    await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status,cooldown_until:rateLimited?new Date(Date.now()+5*60*1000).toISOString():null,last_tested_at:new Date().toISOString()})});
+    return json({ok:ok||rateLimited||temporaryFailure,message:detail},ok||rateLimited||temporaryFailure?200:400);
   }
   if(p==="/settings"&&method==="PATCH"){
     const current=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_process_enabled`);
@@ -1388,7 +1392,7 @@ export default {
     try{const autoOwners=await db(env,"user_settings","?auto_post_enabled=eq.true&global_paused=eq.false&select=owner_id,auto_post_enabled,posts_per_day,timezone,global_paused&limit=1");for(const setting of autoOwners){const ctx:Ctx={userId:setting.owner_id,token:""};try{await scheduleDailyAutoPosts(env,ctx,setting)}catch(e:any){console.error("Daily auto-scheduling failed",setting.owner_id,String(e?.message||e));}}}catch(e:any){console.error("Daily auto-scheduling scan failed",String(e?.message||e));}
     const expiredPublishing=await db(env,"account_meme_assignments",`?status=eq.publishing&publishing_locked_until=lt.${encodeURIComponent(now)}&select=id,owner_id&limit=50`);
     for(const item of expiredPublishing){const ctx:Ctx={userId:item.owner_id,token:""};await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.publishing`,{method:"PATCH",body:JSON.stringify({status:"needs_review",publishing_locked_until:null,rejection_reason:"Publishing worker lease expired. Check Instagram before retrying to avoid a duplicate post."})});}
-    const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id,auto_scheduled&order=scheduled_at.asc&limit=1`);
+    const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id,auto_scheduled,instagram_accounts!inner(posting_enabled)&instagram_accounts.posting_enabled=eq.true&order=scheduled_at.asc&limit=5`);
     for(const item of due){
       const ctx:Ctx={userId:item.owner_id,token:""};const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_post_enabled`);if(settings[0]?.global_paused||(item.auto_scheduled&&!settings[0]?.auto_post_enabled))continue;
       const lease=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.scheduled&approval_status=eq.approved&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({status:"publishing",publishing_started_at:now,publishing_locked_until:new Date(Date.now()+10*60*1000).toISOString()})});
