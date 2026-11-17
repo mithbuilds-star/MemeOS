@@ -179,6 +179,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   for(const name of Object.keys(consumed)){await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(name)}`,{method:"PATCH",body:JSON.stringify({scraped_offset:offsetOf[name]+consumed[name]})});}
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,inserted,skipped,failed_media:failedMedia}})});
   const scrapedAt=new Date().toISOString();const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];for(const username of sourceNames){const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);for(const source of sourceRows)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:scrapedAt,last_scrape_status:"completed"})});}
+  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery imported ${inserted} memes (${failedMedia} media unavailable, ${skipped} skipped).`,inserted,{items_seen:items.length,inserted,skipped,failed_media:failedMedia,source_usernames:sourceNames});
   return {done:true,status:"SUCCEEDED",items_seen:items.length,inserted,skipped,failed_media:failedMedia};
 }
 
@@ -243,6 +244,11 @@ async function signedSongUrl(env:Env,path:string){
   return signed.startsWith("http")?signed:`${env.SUPABASE_URL}/storage/v1${signed}`;
 }
 const LOG=(event:string,fields:Record<string,unknown>)=>console.log(L.logEvent(event,fields));
+async function logMajorActivity(env:Env,ownerId:string,eventType:string,message:string,count:number,metadata:Record<string,unknown>={}){
+  if(count<2)return;
+  try{await db(env,"activity_logs","",{method:"POST",body:JSON.stringify({owner_id:ownerId,event_type:eventType,message,metadata:{...metadata,count}})});}
+  catch(e:any){console.warn("Could not persist activity summary",String(e?.message||e).slice(0,180));}
+}
 // Thrown when a write matches no row because another owner now holds the job. The result is discarded.
 class LostOwnership extends Error{memeId:string;token:string;constructor(memeId:string,token:string){super(`Lost ownership of meme ${memeId}; this attempt's result was discarded.`);this.name="LostOwnership";this.memeId=memeId;this.token=token;}}
 function withTimeout<T>(p:Promise<T>,ms:number,label:string):Promise<T>{let t:any;return Promise.race([p,new Promise<T>((_,rej)=>{t=setTimeout(()=>rej(new Error(`${label} timed out after ${Math.round(ms/1000)} s.`)),ms);})]).finally(()=>clearTimeout(t));}
@@ -379,6 +385,8 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
 async function runBackgroundProcessing(env:Env){
   const nowIso=new Date().toISOString();
   const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&or=(processing_locked_until.is.null,processing_locked_until.lte.${encodeURIComponent(nowIso)})&classification=neq.low_confidence&select=*&order=created_at.asc&limit=25`);
+  const summaries=new Map<string,Record<string,number>>();
+  const tally=(ownerId:string,outcome:string)=>{const row=summaries.get(ownerId)||{};row[outcome]=(row[outcome]||0)+1;summaries.set(ownerId,row);};
   let processed=0;
   // Keep working through the queue within this tick (about 45 s), so the next item starts as soon as the last one finishes.
   const tickStart=Date.now();
@@ -409,7 +417,9 @@ async function runBackgroundProcessing(env:Env){
       if(result.status==="attempts_exhausted"){
         await memeWrite(env,ctx,meme.id,token,{processing_status:"discarded",reel_status:"discarded",processing_locked_until:null,processing_token:null,processing_next_retry_at:null,reel_render_next_retry_at:null,reel_render_locked_until:null,processing_failed_at:new Date().toISOString(),processing_error:`Automatically discarded after 3 identical consecutive errors or 5 consecutive errors. The record and media are kept.`});
         LOG("status_change",{meme_id:meme.id,previous_status:meme.processing_status,new_status:"discarded",worker_id:token,attempt:Number(row.processing_attempts||0),reason:"max attempts exhausted"});
+        tally(ctx.userId,"discarded");
       }else{
+        tally(ctx.userId,String(result.status||"processed"));
         LOG("attempt_end",{meme_id:meme.id,worker_id:token,result:result.status});
       }
     }catch(e:any){
@@ -421,6 +431,12 @@ async function runBackgroundProcessing(env:Env){
       try{await memeWrite(env,ctx,meme.id,token,patch);}
       catch(writeErr:any){dbResult=writeErr instanceof LostOwnership?"lost_ownership":String(writeErr?.message||writeErr).slice(0,200);}
       LOG("attempt_failed",{meme_id:meme.id,previous_status:meme.processing_status,new_status:_terminal?"discarded":"retry_wait",worker_id:token,attempt:_attempt,reason:String(e?.message||e).slice(0,200),database_update:dbResult});
+      tally(ctx.userId,_terminal?"discarded":"retry_wait");
+    }
+  }
+  for(const [ownerId,outcomes] of summaries){
+    for(const [outcome,count] of Object.entries(outcomes)){
+      await logMajorActivity(env,ownerId,"processing_batch",`${count} memes: ${outcome.replace(/_/g," ")}.`,count,{outcome});
     }
   }
 }
@@ -761,6 +777,10 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   const method = req.method;
   const body = method === "GET" || method === "DELETE" ? {} : await req.json().catch(() => ({})) as any;
 
+  if(p==="/activity"&&method==="GET"){
+    const logs=await db(env,"activity_logs",`?${userFilter(ctx)}&select=id,event_type,message,metadata,created_at&order=created_at.desc&limit=100`);
+    return json({logs});
+  }
   if (p === "/overview" && method === "GET") {
     const [a,m,q,pub,sched] = await Promise.all([
       db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id`),
