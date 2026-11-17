@@ -1309,7 +1309,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     for(const source of sources){try{jobs.push(await startApifyDiscoveryForSource(env,ctx,source,creds,false));}catch(e:any){errors.push(e?.message||String(e));}}
     if(!jobs.length)return fail(errors.join(" ")||"No source account could start a discovery run.",502);
     const settingsRow=await db(env,"user_settings",`?${userFilter(ctx)}&select=owner_id`);if(settingsRow.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:new Date().toISOString(),discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,last_discovery_started_at:new Date().toISOString(),discovery_interval_minutes:60,discovery_lock_until:null})});
-    return json({jobs:jobs.map((job:any)=>({job_id:job.id,provider_run_id:job.provider_run_id,source_username:job.metadata?.source_usernames?.[0]})),started:jobs.length,errors},202);
+    return json({job_id:jobs[0]?.id,provider_run_id:jobs[0]?.provider_run_id,jobs:jobs.map((job:any)=>({job_id:job.id,provider_run_id:job.provider_run_id,source_username:job.metadata?.source_usernames?.[0]})),started:jobs.length,errors},202);
   }
   return fail("Route not found.",404);
 }
