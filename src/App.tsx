@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import {
-  Activity, BarChart3, CalendarDays, CheckCheck, Clapperboard, Command, Compass, Database, FileImage, GitBranch, History, HeartPulse, LayoutDashboard,
+  BarChart3, CalendarDays, CheckCheck, Clapperboard, Command, Compass, Database, FileImage, GitBranch, History, HeartPulse, LayoutDashboard,
   LogOut, Menu, Moon, Settings, Sun, Users, Workflow, X
 } from "lucide-react";
 import { initializeSupabase, supabase } from "./lib/supabase";
