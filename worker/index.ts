@@ -540,7 +540,7 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
     delete result.usernames;
   }else if(!("usernames" in result)&&!("directUrls" in result)&&!("startUrls" in result))result.usernames=usernames;
   result.resultsLimit=limit;
-  if(newerThan)result.onlyPostsNewerThan=newerThan;
+  if(newerThan){\n    // Apify accepts UTC timestamps ending in Z, but Postgres/Supabase may\n    // return timezone offsets such as +00:00, which its input validator rejects.\n    const parsed=new Date(newerThan);\n    if(!Number.isNaN(parsed.getTime()))result.onlyPostsNewerThan=parsed.toISOString().replace(/\\.\\d{3}Z$/,\"Z\");\n  }
   return result;
 }
 
