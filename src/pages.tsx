@@ -455,7 +455,22 @@ export function Pipeline() {
     </div>
     <div className="panel" style={{marginTop:18}}>
       <div className="panel-head"><div><h3>Not finished</h3><p>Each item and why it is not done yet. Retry one or all.</p></div><span className="tag">{data?.items?.length??0} ITEMS</span></div>
-      {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>WHY</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small>{m.why}</small></td><td>{m.processing_attempts??0}</td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button><button className="btn secondary small" style={{marginLeft:6}} disabled={busy===m.id} onClick={()=>{if(!confirm("Discard this item? It will not be retried."))return;discardOne(m.id)}}><X size={14}/> Discard</button></td></tr>)}</tbody></table></div>}
+      {!data||data.items?.length===0?<Empty title="Nothing stuck" text="Every item is either generated or rejected."/>:<div className="table-wrap"><table><thead><tr><th>ITEM</th><th>STAGE</th><th>WHY</th><th>ATTEMPTS</th><th></th></tr></thead><tbody>{data.items.map((m:any)=><tr key={m.id}><td><b>{who(m)}</b><small>{(m.extracted_text||"No text yet").slice(0,80)}</small></td><td>{m.processing_status}{m.reel_status&&<small>reel: {m.reel_status}</small>}</td><td><small>{m.why}</small></td><td>{m.processing_attempts??0} <small>{m.processing_consecutive_errors??0}/5 errors</small></td><td><button className="btn small secondary" onClick={()=>retryOne(m.id)} disabled={busy===m.id}>{busy===m.id?<Loader2 className="spin" size={13}/>:<RefreshCw size={13}/>} Retry</button><button className="btn secondary small" style={{marginLeft:6}} disabled={busy===m.id} onClick={()=>{if(!confirm("Discard this item? It will not be retried."))return;discardOne(m.id)}}><X size={14}/> Discard</button></td></tr>)}</tbody></table></div>}
+    </div>
+    <div className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><div><h3>Where everything goes</h3><p>Live counts for every stage and terminal outcome. Updates with the pipeline every 15 seconds.</p></div><span className="tag">{data?.total??0} TOTAL ITEMS</span></div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:10,alignItems:"stretch"}}>
+        {(data?.flow||[]).map((stage:any,i:number)=><div key={stage.key} style={{border:"1px solid var(--border, #333)",borderRadius:12,padding:14,minWidth:0,background:"var(--panel, transparent)"}}>
+          <div style={{fontSize:11,letterSpacing:".08em",textTransform:"uppercase",opacity:.65,minHeight:28}}>{stage.label}</div>
+          <div style={{fontSize:28,fontWeight:700,lineHeight:1.2,fontVariantNumeric:"tabular-nums"}}>{stage.count}</div>
+          <div style={{fontSize:11,opacity:.65,marginTop:6,lineHeight:1.4}}>{stage.detail}</div>
+          {i<6&&<div style={{fontSize:18,opacity:.5,marginTop:8}} aria-hidden="true">↓</div>}
+        </div>)}
+      </div>
+      <div style={{marginTop:14,fontSize:12,opacity:.7}}>The main path is Discovered → To be processed → Processing → Processed → Approval queue → Scheduled → Published. Rejected, discarded, media-unavailable and low-confidence items end in separate terminal outcomes and stay in your history.</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
+        {(data?.flow||[]).filter((x:any)=>["rejected","discarded","media_unavailable","low_confidence"].includes(x.key)).map((stage:any)=><span key={stage.key} className="tag">{stage.label}: {stage.count}</span>)}
+      </div>
     </div>
   </>;
 }
