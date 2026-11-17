@@ -4,12 +4,11 @@ alter table public.memes
   add column if not exists processing_same_error_count integer not null default 0,
   add column if not exists processing_last_error_key text;
 
--- Preserve some history for rows that were already failing before this policy existed.
+-- Historical attempt totals are not consecutive failures. Seed only one error when an old row still has an error message.
 update public.memes
-set processing_consecutive_errors = coalesce(processing_attempts, 0),
+set processing_consecutive_errors = case when processing_error is null then 0 else 1 end,
     processing_same_error_count = case when processing_error is null then 0 else 1 end,
-    processing_last_error_key = case when processing_error is null then null else lower(regexp_replace(trim(processing_error), '[[:space:]]+', ' ', 'g')) end
-where processing_consecutive_errors = 0 and processing_attempts > 0;
+    processing_last_error_key = case when processing_error is null then null else lower(regexp_replace(trim(processing_error), '[[:space:]]+', ' ', 'g')) end;
 
 -- Remove invalid approval cards without deleting the underlying meme or assignment history.
 update public.account_meme_assignments a
