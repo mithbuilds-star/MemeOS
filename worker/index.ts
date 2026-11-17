@@ -378,7 +378,7 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
 
 async function runBackgroundProcessing(env:Env){
   const nowIso=new Date().toISOString();
-  const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&select=*&order=created_at.asc&limit=20`);
+  const pending=await db(env,"memes",`?processing_status=in.(needs_ocr,ocr_complete,ready_for_asset)&or=(processing_next_retry_at.is.null,processing_next_retry_at.lte.${encodeURIComponent(nowIso)})&select=*&order=created_at.asc&limit=1`);
   let processed=0;
   // Keep working through the queue within this tick (about 45 s), so the next item starts as soon as the last one finishes.
   const tickStart=Date.now();
@@ -428,7 +428,7 @@ async function runBackgroundProcessing(env:Env){
 async function runWaitingReels(env:Env){
   const nowIso=new Date().toISOString();
   // Watchdog: a dispatched render that never reported back is a failed attempt, counted and retried with backoff.
-  const stuck=await db(env,"memes",`?reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}&select=*&limit=20`);
+  const stuck=await db(env,"memes",`?reel_status=eq.rendering&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}&select=*&limit=3`);
   for(const m of stuck){
     const ctx:Ctx={userId:m.owner_id,token:""};
     const msg="The GitHub render did not report back within 30 minutes.";
@@ -1304,7 +1304,7 @@ export default {
     try{const autoOwners=await db(env,"user_settings","?auto_post_enabled=eq.true&global_paused=eq.false&select=owner_id,auto_post_enabled,posts_per_day,timezone,global_paused");for(const setting of autoOwners){const ctx:Ctx={userId:setting.owner_id,token:""};try{await scheduleDailyAutoPosts(env,ctx,setting)}catch(e:any){console.error("Daily auto-scheduling failed",setting.owner_id,String(e?.message||e));}}}catch(e:any){console.error("Daily auto-scheduling scan failed",String(e?.message||e));}
     const expiredPublishing=await db(env,"account_meme_assignments",`?status=eq.publishing&publishing_locked_until=lt.${encodeURIComponent(now)}&select=id,owner_id&limit=50`);
     for(const item of expiredPublishing){const ctx:Ctx={userId:item.owner_id,token:""};await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.publishing`,{method:"PATCH",body:JSON.stringify({status:"needs_review",publishing_locked_until:null,rejection_reason:"Publishing worker lease expired. Check Instagram before retrying to avoid a duplicate post."})});}
-    const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id,auto_scheduled&order=scheduled_at.asc&limit=25`);
+    const due = await db(env,"account_meme_assignments",`?approval_status=eq.approved&status=eq.scheduled&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})&select=id,owner_id,auto_scheduled&order=scheduled_at.asc&limit=1`);
     for(const item of due){
       const ctx:Ctx={userId:item.owner_id,token:""};const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,auto_post_enabled`);if(settings[0]?.global_paused||(item.auto_scheduled&&!settings[0]?.auto_post_enabled))continue;
       const lease=await db(env,"account_meme_assignments",`?id=eq.${item.id}&${userFilter(ctx)}&status=eq.scheduled&approval_status=eq.approved&scheduled_at=lte.${encodeURIComponent(now)}&or=(publishing_locked_until.is.null,publishing_locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({status:"publishing",publishing_started_at:now,publishing_locked_until:new Date(Date.now()+10*60*1000).toISOString()})});
