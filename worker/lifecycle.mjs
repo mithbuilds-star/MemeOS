@@ -6,7 +6,7 @@
 // written on claim; every later write must match it (compare-and-set).
 
 export const DEFAULTS = {
-  maxAttempts: 5, // hard ceiling; same-error threshold below may discard earlier
+  maxAttempts: 5, // discard after this many consecutive errors\n  sameErrorLimit: 3, // discard sooner when the exact same error repeats
   attemptTimeoutMs: 120_000,       // per-attempt OCR/classify timeout
   renderWatchdogMs: 30 * 60_000,   // how long a dispatched GitHub render may run
   backoffBaseMs: 60_000,           // retry_wait backoff: base * 2^(attempt-1), capped
@@ -65,7 +65,7 @@ export function failureOutcome(row, message, nowMs, cfg = DEFAULTS) {
   const consecutive = Number(row.processing_consecutive_errors || 0) + 1;
   const same = key && key === String(row.processing_last_error_key || "") 
     ? Number(row.processing_same_error_count || 0) + 1 : 1;
-  const terminal = same >= 3 || consecutive >= 5;
+  const terminal = same >= cfg.sameErrorLimit || consecutive >= cfg.maxAttempts;
   const base = {
     processing_attempts: attempt,
     processing_consecutive_errors: consecutive,
@@ -94,7 +94,7 @@ export function renderDispatchPatch(row, nowMs, cfg = DEFAULTS) {
 
 export function shouldFailRender(row, cfg = DEFAULTS) {
   // Dispatches are not failures. Only recorded consecutive errors can exhaust a render.
-  return Number(row.processing_consecutive_errors || 0) >= 5;
+  return Number(row.processing_consecutive_errors || 0) >= cfg.maxAttempts;
 }
 
 // Recovery: a lease that expired without renewal means the worker is gone.
