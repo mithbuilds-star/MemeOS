@@ -1609,7 +1609,7 @@ export default {
         if(!lease?.length)continue;
         polledJobs++;
         const result=await runApifyPoll(env,ctx,{...job,...lease[0]});
-        if(!result.done)await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"running",locked_until:null,next_retry_at:new Date(Date.now()+5*60*1000).toISOString()})});
+        if(!result.done)await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"running",locked_until:null,next_retry_at:new Date(Date.now()+60*1000).toISOString()})});
       } catch (e:any) {
         const attempt=Number(job.attempt_count||0)+1;const terminal=/finished with status (FAILED|ABORTED|TIMED-OUT)/i.test(String(e?.message||e));
         const exhausted=attempt>=Number(job.max_attempts||5)||terminal;
