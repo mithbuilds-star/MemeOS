@@ -1009,7 +1009,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
       { key:"discovered", label:"Discovered", count:total, detail:"All source and manual meme records" },
       { key:"to_process", label:"To be processed", count:readyQueueRows.length + retryWaitRows.length + renderRetryRows.length, detail:"Queued now or waiting for retry time" },
       { key:"processing", label:"Processing", count:runningRows.length, detail:"OCR, classification or render work in progress" },
-      { key:"processed", label:"Processed", count:rows.filter((r) => ["generated","rejected"].includes(r.processing_status)).length, detail:"Generation completed or content classified out" },
+      { key:"processed", label:"Processed", count:rows.filter((r) => r.processing_status === "generated").length, detail:"Assets generated and ready for approval" },
       { key:"approval", label:"Approval queue", count:pendingApproval, detail:"Generated items awaiting your decision" },
       { key:"scheduled", label:"Scheduled", count:assignments.filter((a) => a.status === "scheduled").length, detail:"Approved destination assignments with a schedule" },
       { key:"published", label:"Published", count:assignments.filter((a) => a.status === "published").length, detail:"Successfully published assignments" },
