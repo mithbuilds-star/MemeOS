@@ -479,6 +479,30 @@ async function runWaitingReels(env:Env){
 
 const DEFAULT_APIFY_ACTOR = "apify/instagram-scraper";
 const SCRAPE_BATCH=20;
+
+async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false){
+  let lastError="No Apify key could start the run.";
+  for(const credential of credentials){
+    try{
+      const secret=await decryptSecret(env,credential);
+      const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));
+      const input=buildActorInput(credential.actor_input,[source.username],credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,source.last_scraped_at||null);
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
+      const result:any=await response.json().catch(()=>({}));
+      if(!response.ok){
+        lastError=result.error?.message||`Apify returned ${response.status}.`;
+        if(response.status===401||response.status===403)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:new Date().toISOString()})});
+        else if(response.status===429)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+5*60*1000).toISOString(),last_used_at:new Date().toISOString()})});
+        continue;
+      }
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:credential.actor_id,source_usernames:[source.username],source_reference_account_id:source.id,scheduled}})});
+      if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
+      return job[0];
+    }catch(e:any){lastError=e?.message||lastError;}
+  }
+  throw new Error(`@${source.username}: ${lastError}`);
+}
 function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null){
   const input=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
   const replace=(value:any):any=>{
@@ -554,12 +578,9 @@ async function runScheduledDiscovery(env:Env){
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)continue;
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
     if(settingsRows.length){const lock=await db(env,"user_settings",`?${userFilter(ctx)}&or=(discovery_lock_until.is.null,discovery_lock_until.lte.${encodeURIComponent(new Date().toISOString())})`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:lockUntil})});if(!lock?.length)continue;}else{try{await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,discovery_interval_minutes:60,discovery_lock_until:lockUntil})});}catch{continue;}}
-    let started:any=null,used:any=null;
-    for(const credential of creds){try{const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const cursorValues=selected.map((s:any)=>s.last_scraped_at).filter(Boolean).sort();const cursor=cursorValues[0]||null;const input=buildActorInput(credential.actor_input,selected.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,cursor);const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});const data:any=await response.json().catch(()=>({}));if(response.ok){started=data;used=credential;break;}await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:response.status===429?"rate_limited":"error",cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});}catch{}}
-    if(!started?.data?.id){await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({discovery_lock_until:null})});continue;}
-    await db(env,"api_credentials",`?id=eq.${used.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
-    await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ownerId,job_type:"discovery",status:"running",provider_run_id:started.data.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:started.data.defaultDatasetId,credential_id:used.id,actor_id:used.actor_id,source_usernames:selected.map((s:any)=>s.username),scheduled:true}})});
-    if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:new Date().toISOString(),discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,last_discovery_started_at:new Date().toISOString(),discovery_interval_minutes:60,discovery_lock_until:null})});
+    let startedCount=0;
+    for(const source of selected){try{await startApifyDiscoveryForSource(env,ctx,source,creds,true);startedCount++;}catch(e:any){console.error("Scheduled discovery start failed",source.username,String(e?.message||e));}}
+    if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:startedCount?new Date().toISOString():settings.last_discovery_started_at,discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,last_discovery_started_at:startedCount?new Date().toISOString():null,discovery_interval_minutes:60,discovery_lock_until:null})});
   }
 }
 
@@ -1284,24 +1305,11 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at`);
     const sources=allSources?allSourcesRows:allSourcesRows.filter((source:any)=>allowed.has(source.id));
     if(!sources.length)return fail("Add or assign at least one enabled reference account to a destination with discovery enabled.");
-    let started:any=null;let used:any=null;let lastError="No Apify key could start the run.";
-    for(const credential of creds){
-      try{
-        const secret=await decryptSecret(env,credential);const actor=encodeURIComponent((credential.actor_id||DEFAULT_APIFY_ACTOR).replace("/","~"));const cursorValues=sources.map((s:any)=>s.last_scraped_at).filter(Boolean).sort();const cursor=cursorValues[0]||null;const input=buildActorInput(credential.actor_input,sources.map((s:any)=>s.username),credential.actor_id||DEFAULT_APIFY_ACTOR,SCRAPE_BATCH,cursor);
-        const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input)});
-        const result:any=await response.json().catch(()=>({}));
-        if(response.ok){started=result;used=credential;break;}
-        lastError=result.error?.message||`Apify returned ${response.status}.`;
-        if(response.status===401||response.status===403)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:new Date().toISOString()})});
-        else if(response.status===429)await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"rate_limited",cooldown_until:new Date(Date.now()+5*60*1000).toISOString(),last_used_at:new Date().toISOString()})});
-        if(response.status!==429&&response.status<500)continue;
-      }catch(e:any){lastError=e.message||lastError;}
-    }
-    if(!started)return fail(lastError,502);
-    await db(env,"api_credentials",`?id=eq.${used.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-    const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:started.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:started.data?.defaultDatasetId,credential_id:used.id,actor_id:used.actor_id,source_usernames:sources.map((s:any)=>s.username)}})});
+    const jobs:any[]=[];const errors:string[]=[];
+    for(const source of sources){try{jobs.push(await startApifyDiscoveryForSource(env,ctx,source,creds,false));}catch(e:any){errors.push(e?.message||String(e));}}
+    if(!jobs.length)return fail(errors.join(" ")||"No source account could start a discovery run.",502);
     const settingsRow=await db(env,"user_settings",`?${userFilter(ctx)}&select=owner_id`);if(settingsRow.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:new Date().toISOString(),discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,last_discovery_started_at:new Date().toISOString(),discovery_interval_minutes:60,discovery_lock_until:null})});
-    return json({job_id:job?.[0]?.id,provider_run_id:started.data?.id,credential_label:used.label},202);
+    return json({jobs:jobs.map((job:any)=>({job_id:job.id,provider_run_id:job.provider_run_id,source_username:job.metadata?.source_usernames?.[0]})),started:jobs.length,errors},202);
   }
   return fail("Route not found.",404);
 }
