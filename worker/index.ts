@@ -697,6 +697,26 @@ async function refreshDueApifyKeys(env:Env,ctx:Ctx){
   for(const credential of credentials){try{await refreshCredentialUsage(env,ctx,credential);}catch(error:any){console.error("Apify cycle reset check failed",credential.label,String(error?.message||error));}}
 }
 
+// An enabled key can be marked "error" after a temporary Apify outage or a
+// rejected actor-start request. Probe it automatically every 15 minutes.
+// A successful /users/me/limits check restores "connected"; invalid/revoked
+// tokens and exhausted plans remain blocked by refreshCredentialUsage.
+async function recoverErroredApifyKeys(env:Env,ctx:Ctx){
+  const retryBefore=new Date(Date.now()-15*60*1000).toISOString();
+  const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&status=eq.error&or=(last_used_at.is.null,last_used_at.lt.${encodeURIComponent(retryBefore)})&select=*`);
+  for(const credential of credentials){
+    try{
+      const snapshot=await refreshCredentialUsage(env,ctx,credential);
+      if(snapshot?.limit_reached)continue;
+      console.info("Apify credential auto-recovered",credential.label);
+    }catch(error:any){
+      const retryAt=new Date().toISOString();
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",last_used_at:retryAt})}).catch(()=>{});
+      console.error("Apify credential auto-recovery failed",credential.label,String(error?.message||error));
+    }
+  }
+}
+
 async function runScheduledDiscovery(env:Env){
   const active=await db(env,"instagram_accounts","?discovery_enabled=eq.true&select=owner_id");
   const owners=[...new Set(active.map((a:any)=>a.owner_id))].slice(0,1);const now=Date.now();
@@ -704,6 +724,7 @@ async function runScheduledDiscovery(env:Env){
     const ctx:Ctx={userId:ownerId,token:""};
     const settingsRows=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,discovery_interval_minutes,last_discovery_started_at,last_usage_refresh_date`);
     await refreshDueApifyKeys(env,ctx);
+    await recoverErroredApifyKeys(env,ctx);
     const settings=settingsRows[0]||{};
     const indiaDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
     if(settings.last_usage_refresh_date!==indiaDate){
