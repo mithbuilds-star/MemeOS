@@ -193,7 +193,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
   return response;
 }
 
-async function chainNextDiscovery(env:Env,ctx:Ctx,source:any,phase:"incremental"|"backfill"){
+async function chainNextDiscovery(env:Env,ctx:Ctx,source:any,phase:"incremental"|"backfill"|"reanchor"){
   if(await hasActiveDiscoveryForSource(env,ctx,source.id))return;
   const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
   if(!credentials.length)return;
@@ -233,7 +233,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // One page per run, inside the window stored on this job.
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`,job);
   const items:any[]=await itemsRes.json();
-  const phase=isBackfill?"backfill":"incremental";
+  const phase=isBackfill?"backfill":(job.metadata?.phase==="reanchor"?"reanchor":"incremental");
   const window={newerThan:job.metadata?.window_newer_than?Date.parse(job.metadata.window_newer_than):null,olderThan:job.metadata?.window_older_than?Date.parse(job.metadata.window_older_than):null};
   const page=D.classifyPage(items,window,{parseTs:(item:any)=>{const value=normalizeApifyItem(item).postedAt;return value?Date.parse(value):null;}});
   const counts={inserted:0,duplicates:0,insertErrors:0,failedMedia:0};
@@ -287,7 +287,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // The job is completed before chaining so the active-run guard does not see this run.
   if(source&&plan?.ok){
     const next={...source,...plan.patch};
-    if(phase==="incremental"&&next.discovery_upper_bound)await chainNextDiscovery(env,ctx,next,"incremental");
+    if(phase==="reanchor"&&next.discovery_upper_bound)await chainNextDiscovery(env,ctx,next,"reanchor");
+    else if(phase==="reanchor"&&next.backfill_before&&next.backfill_complete!==true)await chainNextDiscovery(env,ctx,next,"backfill");
+    else if(phase==="incremental"&&next.discovery_upper_bound)await chainNextDiscovery(env,ctx,next,"incremental");
     else if(phase==="backfill"&&plan.complete===false)await chainNextDiscovery(env,ctx,next,"backfill");
     else if(phase==="incremental"&&next.backfill_complete!==true&&next.backfill_before)await chainNextDiscovery(env,ctx,next,"backfill");
   }
@@ -615,8 +617,10 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       // backward from the exact timestamp saved after the previous 25-post page.
       // Each account has its own window: incremental = (last_scraped_at, discovery_upper_bound),
       // backfill = (-inf, backfill_before). Windows are stored on the job so polling uses the same one.
-      const windowNewer=phase==="backfill"?null:(source.last_scraped_at||null);
-      const windowOlder=phase==="backfill"?(backfillBefore||source.backfill_before||null):(source.discovery_upper_bound||null);
+      // Accounts never re-anchored get a one-time "reanchor" scan first (see discovery.mjs).
+      const runPhase=phase==="incremental"&&!source.reanchored_at?"reanchor":phase;
+      const windowNewer=runPhase==="incremental"?(source.last_scraped_at||null):null;
+      const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(source.discovery_upper_bound||null);
       const input=buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,windowNewer,windowOlder);
       // Hard-cap runtime and billable results. Historical filtering may page past newer posts.
       const runTimeoutSeconds=phase==="backfill"?900:600;
@@ -632,7 +636,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase,backfill_before:phase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase:runPhase,backfill_before:runPhase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null}})});
       if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
       return job[0];
     }catch(e:any){lastError=e?.message||lastError;}
@@ -787,7 +791,7 @@ async function runScheduledDiscovery(env:Env){
     const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&discovery_enabled=eq.true&select=id`);if(!accounts.length)continue;
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let all=false;for(const a of accounts){const own=mappings.filter((m:any)=>m.destination_account_id===a.id);if(!own.length)all=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound`);
+    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,reanchored_at`);
     const selected=all?sources:sources.filter((s:any)=>allowed.has(s.id));if(!selected.length)continue;
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)continue;
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
@@ -1533,7 +1537,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!activeAccounts.length)return fail("Enable discovery on at least one destination account first.");
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let allSources=false;for(const account of activeAccounts){const own=mappings.filter((m:any)=>m.destination_account_id===account.id);if(!own.length)allSources=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound`);
+    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,reanchored_at`);
     const sources=allSources?allSourcesRows:allSourcesRows.filter((source:any)=>allowed.has(source.id));
     if(!sources.length)return fail("Add or assign at least one enabled reference account to a destination with discovery enabled.");
     const jobs:any[]=[];const errors:string[]=[];

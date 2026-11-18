@@ -248,3 +248,43 @@ test("13. a full backfill page with no new posts stops instead of re-walking imp
   assert.equal(plan.patch.backfill_complete, true);
   assert.match(plan.patch.backfill_stop_reason, /already imported/);
 });
+
+// Re-anchor: scan the feed from the newest post until a page is entirely already imported.
+function runReanchor(source, store, posts, tally = { inserted: 0, duplicates: 0, insertErrors: 0 }) {
+  for (let i = 0; i < 100; i++) {
+    const window = { newerThan: null, olderThan: source.discovery_upper_bound ? Date.parse(source.discovery_upper_bound) : null };
+    const page = D.classifyPage(actor(posts, window), window, { parseTs });
+    const insertedBefore = tally.inserted;
+    applyPage(store, page, tally);
+    const plan = D.planAdvance("reanchor", source, { ...pageSummary(page, 0), inserted: tally.inserted - insertedBefore }, BASE + 3600e3);
+    assert.equal(plan.ok, true, plan.error);
+    applyPatch(source, plan.patch);
+    if (plan.complete) return tally;
+  }
+  throw new Error("re-anchor did not finish");
+}
+
+test("14. re-anchor imports new posts above old imports and stops at the first all-imported page", () => {
+  // Imported: posts 50..100 (old code). Feed: posts 1..110. New posts are 101..110 and 1..49.
+  const feed = Array.from({ length: 110 }, (_, i) => post(i + 1, i + 1));
+  const store = makeStore();
+  for (let n = 50; n <= 100; n++) store.rows.set(`CODE${n}`, {});
+  const source = { id: "s", username: "acct", last_scraped_at: null, backfill_before: null, backfill_pages: 0, backfill_complete: false, discovery_upper_bound: null, discovery_sweep_top: null, reanchored_at: null };
+  const tally = runReanchor(source, store, feed);
+  assert.equal(tally.inserted, 10, "only posts above the imported range are new so far");
+  assert.equal(source.last_scraped_at, at(110));
+  assert.equal(source.backfill_complete, false);
+  assert.ok(source.backfill_before, "backfill must start below the imported range");
+  assert.ok(source.reanchored_at);
+  // Backfill then walks down and fills the rest, deduplicating the imported middle.
+  runBackfill(source, store, feed, tally);
+  assert.equal(store.rows.size, 110);
+});
+
+test("15. re-anchor over an empty feed completes without touching existing rows", () => {
+  const source = { id: "s", username: "acct", last_scraped_at: null, backfill_before: null, backfill_pages: 0, backfill_complete: false, discovery_upper_bound: null, discovery_sweep_top: null, reanchored_at: null };
+  const store = makeStore();
+  runReanchor(source, store, []);
+  assert.equal(source.backfill_complete, true);
+  assert.equal(store.rows.size, 0);
+});

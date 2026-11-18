@@ -119,6 +119,38 @@ export function planAdvance(phase, source, page, jobCreatedMs) {
     return { ok: true, retry: true, patch: { last_scrape_status: "partial_failure" } };
   }
 
+  if (phase === "reanchor") {
+    // One-time scan of the whole feed from the newest post. Walk down while pages contain new posts;
+    // a page with nothing new means everything from here down is already imported.
+    const sweepTop = Math.max(ms(source.discovery_sweep_top) ?? -Infinity, page.newestInWindowMs ?? -Infinity);
+    const topIso = Number.isFinite(sweepTop) ? iso(sweepTop) : null;
+    const finish = (backfillFrom, backfillDone, reason) => ({
+      ok: true,
+      complete: true,
+      patch: {
+        ...(topIso ? { last_scraped_at: topIso } : {}),
+        discovery_upper_bound: null,
+        discovery_sweep_top: null,
+        ...(backfillFrom ? { backfill_before: backfillFrom } : {}),
+        backfill_complete: backfillDone,
+        backfill_stop_reason: reason,
+        reanchored_at: iso(jobCreatedMs),
+        last_scrape_status: "completed",
+      },
+    });
+    if (page.rawCount === 0) return finish(null, true, "The feed returned no posts.");
+    if (page.oldestInWindowMs == null) return { ok: false, error: "The feed page has no usable timestamps, so re-anchoring is unsafe." };
+    if (page.inserted === 0) {
+      // Everything from this page down is imported; history below it is what backfill still needs.
+      return finish(iso(page.oldestInWindowMs), false, null);
+    }
+    if (!truncated) return finish(null, true, "The whole feed was scanned: the actor returned fewer than a full page.");
+    const next = page.oldestInWindowMs + OVERLAP_MS;
+    const upper = ms(source.discovery_upper_bound);
+    if (upper != null && next >= upper) return { ok: false, error: "Re-anchoring made no progress (identical timestamps). Stopped instead of repeating the page." };
+    return { ok: true, complete: false, patch: { discovery_upper_bound: iso(next), discovery_sweep_top: topIso, last_scrape_status: "reanchoring" } };
+  }
+
   if (phase === "backfill") {
     const before = ms(source.backfill_before);
     if (page.rawCount === 0) {
