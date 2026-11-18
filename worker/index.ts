@@ -242,9 +242,15 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   const statusRes=preItems?null:await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
   const statusData:any=statusRes?await statusRes.json().catch(()=>({})):{data:{status:"SUCCEEDED",defaultDatasetId:null}};
   const run=statusData.data||{};
+  // Normalize provider status defensively: never silently leave a job running
+  // forever because an API response uses a different casing/terminal alias.
+  const providerStatus=String(run.status||run.state||"").trim().toUpperCase().replace(/_/g,"-");
+  if(!providerStatus)throw new Error("Apify returned a run response without a status; polling will retry instead of leaving the job silently running.");
+  const succeeded=["SUCCEEDED","SUCCESS","COMPLETED","DONE"].includes(providerStatus);
+  const failed=["FAILED","ABORTED","TIMED-OUT","CANCELED","CANCELLED"].includes(providerStatus);
   // Resolve the phase before either the timeout or dataset-import path uses it.
   const isBackfill=job.metadata?.phase==="backfill"||(job.metadata?.phase==="simple"&&job.metadata?.mode==="history");
-  if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status)){
+  if(!succeeded&&!failed){
     // A profile page capped at 25 posts should never occupy a Worker job forever.
     // Check the actual Apify state first so a completed-but-unpolled run is still imported.
     const maxAgeMs=isBackfill?20*60*1000:(job.metadata?.phase==="dating"?90*60*1000:12*60*1000);
@@ -258,9 +264,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
     }
     return {done:false,status:run.status};
   }
-  if(run.status!=="SUCCEEDED"){
-    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:`Apify run finished with status ${run.status}.`,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
-    throw new Error(`Apify run finished with status ${run.status}.`);
+  if(!succeeded){
+    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:`Apify run finished with status ${providerStatus}.`,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
+    throw new Error(`Apify run finished with status ${providerStatus}.`);
   }
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id||(preItems?"sync":null);
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
@@ -1832,8 +1838,13 @@ export default {
         const result=await runApifyPoll(env,ctx,{...job,...lease[0]});
         if(!result.done)await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"running",locked_until:null,next_retry_at:new Date(Date.now()+60*1000).toISOString()})});
       } catch (e:any) {
-        const attempt=Number(job.attempt_count||0)+1;const terminal=/finished with status (FAILED|ABORTED|TIMED-OUT)/i.test(String(e?.message||e));
-        const exhausted=attempt>=Number(job.max_attempts||5)||terminal;
+        // A downstream chaining error can happen after runApifyPoll has already
+        // completed this page. Never turn a completed/failed job back into queued.
+        const fresh=await db(env,"jobs",`?id=eq.${job.id}&select=status,attempt_count,max_attempts`);
+        if(!fresh?.length||["completed","failed"].includes(String(fresh[0].status)))continue;
+        const attempt=Number(fresh[0].attempt_count??job.attempt_count??0)+1;
+        const terminal=/finished with status (FAILED|ABORTED|TIMED-OUT|CANCELED|CANCELLED)/i.test(String(e?.message||e));
+        const exhausted=attempt>=Number(fresh[0].max_attempts||job.max_attempts||5)||terminal;
         const delay=Math.min(60,Math.pow(2,attempt)*2);
         await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:exhausted?"failed":"queued",last_error:String(e?.message||e).slice(0,500),completed_at:exhausted?now:null,attempt_count:attempt,retry_count:attempt,next_retry_at:exhausted?null:new Date(Date.now()+delay*60*1000).toISOString(),locked_until:null})});
       }
