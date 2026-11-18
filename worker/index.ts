@@ -358,7 +358,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   const jobCreatedMs=job.created_at?Date.parse(job.created_at):Date.now();
   // Cursor movement lives only in planAdvance: it never moves on partial insert failure or an ignored window.
   let plan:any=null;
-  if(source){
+  // Simple jobs (newest 25, then older pages of 25) manage their own pointer below; the old planner is skipped.
+  if(source&&job.metadata?.phase!=="simple"){
     // Incremental jobs always fetch newest-first (no date window), so they use the "newest" rule: no catch-up chaining.
     plan=D.planAdvance(phase==="incremental"?"newest":phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors,inserted:counts.inserted},jobCreatedMs);
     if(plan.ok) await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(plan.patch)});
@@ -366,6 +367,18 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scrape_status:"error"})});
       console.error("Discovery window error",source.username,plan.error);
     }
+  }
+  if(source&&job.metadata?.phase==="simple"){
+    const oldestPosted=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean).sort()[0];
+    let pointerPatch:any=null;
+    if(job.metadata?.mode==="history"){
+      // A short or empty page means history has ended; otherwise the pointer moves to the oldest post seen.
+      pointerPatch=(items.length<SIMPLE_PAGE||!oldestPosted)?{backfill_complete:true,last_scrape_status:"completed"}:{backfill_before:oldestPosted,backfill_complete:false,last_scrape_status:"completed"};
+    } else if(!source.backfill_before&&oldestPosted){
+      // Newest page on a fresh account: its oldest post is where history starts.
+      pointerPatch={backfill_before:oldestPosted,last_scrape_status:"completed"};
+    }
+    if(pointerPatch)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(pointerPatch)});
   }
   if(partial){
     // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
@@ -703,6 +716,43 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
   const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
   return active.length>0;
 }
+const SIMPLE_PAGE=25;
+// One Apify call for one page of 25 posts. mode "newest": no date filter. mode "history": only posts older than olderThan.
+async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode:"newest"|"history",olderThan:string|null){
+  let lastError="No Apify key could run the page.";
+  for(const credential of credentials){
+    if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
+    try{
+      const secret=await decryptSecret(env,credential);
+      const actorId=DEFAULT_APIFY_ACTOR;
+      const actor=encodeURIComponent(actorId.replace("/","~"));
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,null,mode==="history"?olderThan:null);
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${SIMPLE_PAGE}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
+      const body:any=await response.json().catch(()=>null);
+      if(!response.ok){lastError=body?.error?.message||`Apify returned ${response.status}.`;continue;}
+      const items:any[]=Array.isArray(body)?body:[];
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"simple",mode,window_newer_than:null,window_older_than:mode==="history"?olderThan:null}})});
+      if(!job?.[0]?.id)throw new Error("Page fetched, but MemeOS could not save the discovery job.");
+      try{
+        return await runApifyPoll(env,ctx,job[0],items);
+      }catch(error:any){
+        await db(env,"jobs",`?id=eq.${job[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,200)}`})}).catch(()=>{});
+        throw error;
+      }
+    }catch(e:any){lastError=e?.message||lastError;}
+  }
+  throw new Error(`@${source.username}: ${lastError}`);
+}
+// Every cycle: check the newest 25 (imports anything new), then take the next older page of 25 until history ends.
+async function runSimpleCycle(env:Env,ctx:Ctx,source:any,credentials:any[]){
+  await startSimplePage(env,ctx,source,credentials,"newest",null);
+  // History only runs once the newest page has set its starting pointer.
+  if(source.backfill_complete!==true&&source.backfill_before){
+    await startSimplePage(env,ctx,source,credentials,"history",source.backfill_before);
+  }
+}
+
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null,deepOlderThan?:string|null){
   let lastError="No Apify key could start the run.";
   for(const credential of credentials){
@@ -917,8 +967,7 @@ async function runScheduledDiscovery(env:Env){
     for(const source of selected){
       try{
         if(await hasActiveDiscoveryForSource(env,ctx,source.id))continue;
-        if(!source.legacy_dated_at){await startDatingRun(env,ctx,source,creds);startedCount++;continue;}
-        await startApifyDiscoveryForSource(env,ctx,source,creds,true);startedCount++;
+        await runSimpleCycle(env,ctx,source,creds);startedCount++;
       }catch(e:any){console.error("Scheduled discovery start failed",source.username,String(e?.message||e));}
     }
     if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:startedCount?new Date().toISOString():settings.last_discovery_started_at,discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,last_discovery_started_at:startedCount?new Date().toISOString():null,discovery_interval_minutes:60,discovery_lock_until:null})});
