@@ -1804,7 +1804,7 @@ export default {
       const ctx:Ctx={userId:job.owner_id,token:""};
       try {
         const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)continue;
-        const lease=await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}&status=in.(running,queued)&or=(locked_until.is.null,locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({last_attempt_at:now,locked_until:new Date(Date.now()+90*1000).toISOString()})});
+        const lease=await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}&status=in.(running,queued)&or=(locked_until.is.null,locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({last_attempt_at:now,locked_until:new Date(Date.now()+5*60*1000).toISOString()})});
         if(!lease?.length)continue;
         polledJobs++;
         const result=await runApifyPoll(env,ctx,{...job,...lease[0]});
