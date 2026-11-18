@@ -196,8 +196,8 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // One-off pull of the newest posts for an account, used only to write publish dates onto existing rows.
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
-// Deep incremental run: the newest 100 posts per account, used when the newest 25 had fewer than 5 new posts.
-const INCREMENTAL_RUN_LIMIT=100;
+// Deep incremental run: the newest 25 (already checked) plus the next 100. Posts already imported are skipped by dedupe.
+const INCREMENTAL_RUN_LIMIT=125;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
   let lastError="No Apify key could start the dating run.";
   for(const credential of credentials){
