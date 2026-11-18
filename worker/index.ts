@@ -197,7 +197,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
 // Deep incremental run: the newest 25 (already checked) plus the next 100. Posts already imported are skipped by dedupe.
-const INCREMENTAL_RUN_LIMIT=125;
+const INCREMENTAL_RUN_LIMIT=100;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
   let lastError="No Apify key could start the dating run.";
   for(const credential of credentials){
@@ -338,7 +338,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       console.error("Discovery window error",source.username,plan.error);
     }
   }
-  const summary={phase,items_seen:page.seen,items_eligible:counts.inserted+counts.duplicates+counts.insertErrors,inserted:counts.inserted,duplicates:counts.duplicates,insert_errors:counts.insertErrors,invalid_ids:page.invalid,out_of_window:page.outOfWindow,missing_timestamp:page.missingTimestamp,skipped:page.outOfWindow+page.invalid+counts.duplicates,failed_media:counts.failedMedia,window_error:plan&&!plan.ok?plan.error:null,cursor_retry:!!plan?.retry};
+  const postedTimes=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean) as string[];
+  const oldestPostAt=postedTimes.length?postedTimes.sort()[0]:null;
+  const summary={oldest_post_at:oldestPostAt,phase,items_seen:page.seen,items_eligible:counts.inserted+counts.duplicates+counts.insertErrors,inserted:counts.inserted,duplicates:counts.duplicates,insert_errors:counts.insertErrors,invalid_ids:page.invalid,out_of_window:page.outOfWindow,missing_timestamp:page.missingTimestamp,skipped:page.outOfWindow+page.invalid+counts.duplicates,failed_media:counts.failedMedia,window_error:plan&&!plan.ok?plan.error:null,cursor_retry:!!plan?.retry};
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,...summary}})});
   // The job is completed before chaining so the active-run guard does not see this run.
   if(source&&plan?.ok){
@@ -353,7 +355,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   if(phase==="incremental"&&counts.inserted<5&&!job.metadata?.deep_limit&&source&&!(await hasActiveDiscoveryForSource(env,ctx,source.id))){
     try{
       const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
-      if(creds.length)await startApifyDiscoveryForSource(env,ctx,source,creds,false,"incremental",null,INCREMENTAL_RUN_LIMIT);
+      // Skip the 25 already checked: ask the actor only for posts older than the oldest of them.
+      if(creds.length)await startApifyDiscoveryForSource(env,ctx,source,creds,false,"incremental",null,INCREMENTAL_RUN_LIMIT,job.metadata?.oldest_post_at||summary.oldest_post_at||null);
     }catch(error:any){console.error("Deep incremental start failed",source.username,String(error?.message||error));}
   }
   await refreshAllCredentialUsage(env,ctx);
@@ -665,7 +668,7 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
   const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
   return active.length>0;
 }
-async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null){
+async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null,deepOlderThan?:string|null){
   let lastError="No Apify key could start the run.";
   for(const credential of credentials){
     if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
@@ -687,7 +690,8 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       const isNewestRun=runPhase==="incremental";
       const runLimit=isNewestRun&&deepLimit?deepLimit:SCRAPE_BATCH;
       const windowNewer=null;
-      const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(isNewestRun?null:(source.discovery_upper_bound||null));
+      // A deep run asks the actor only for posts older than the oldest post the first run already checked.
+      const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(isNewestRun?(deepLimit?deepOlderThan||null:null):(source.discovery_upper_bound||null));
       const input=buildActorInput(credential.actor_input,[source.username],actorId,runLimit,windowNewer,windowOlder);
       // Hard-cap runtime and billable results. Historical filtering may page past newer posts.
       const runTimeoutSeconds=phase==="backfill"?900:600;
