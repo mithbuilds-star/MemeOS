@@ -298,7 +298,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
     await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,dated_matched:matched,dated_updated:updated}})});
     return {done:true,status:"SUCCEEDED",items_seen:items.length,dated_matched:matched,dated_updated:updated};
   }
-  const phase=isBackfill?"backfill":(job.metadata?.phase==="reanchor"?"reanchor":"incremental");
+  const phase=job.metadata?.phase==="simple"?"simple":(isBackfill?"backfill":(job.metadata?.phase==="reanchor"?"reanchor":"incremental"));
   const window={newerThan:job.metadata?.window_newer_than?Date.parse(job.metadata.window_newer_than):null,olderThan:job.metadata?.window_older_than?Date.parse(job.metadata.window_older_than):null};
   const page=D.classifyPage(items,window,{parseTs:(item:any)=>{const value=normalizeApifyItem(item).postedAt;return value?Date.parse(value):null;}});
   const counts={inserted:0,duplicates:0,insertErrors:0,failedMedia:0};
@@ -368,17 +368,17 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
       console.error("Discovery window error",source.username,plan.error);
     }
   }
+  let simplePointerPatch:any=null;
   if(source&&job.metadata?.phase==="simple"){
     const oldestPosted=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean).sort()[0];
-    let pointerPatch:any=null;
     if(job.metadata?.mode==="history"){
       // A short or empty page means history has ended; otherwise the pointer moves to the oldest post seen.
-      pointerPatch=(items.length<SIMPLE_PAGE||!oldestPosted)?{backfill_complete:true,last_scrape_status:"completed"}:{backfill_before:oldestPosted,backfill_complete:false,last_scrape_status:"completed"};
+      simplePointerPatch=(items.length<SIMPLE_PAGE||!oldestPosted)?{backfill_complete:true,last_scrape_status:"completed"}:{backfill_before:oldestPosted,backfill_complete:false,last_scrape_status:"completed"};
     } else if(!source.backfill_before&&oldestPosted){
       // Newest page on a fresh account: its oldest post is where history starts.
-      pointerPatch={backfill_before:oldestPosted,last_scrape_status:"completed"};
+      simplePointerPatch={backfill_before:oldestPosted,last_scrape_status:"completed"};
     }
-    if(pointerPatch)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(pointerPatch)});
+    if(simplePointerPatch)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(simplePointerPatch)});
   }
   if(partial){
     // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
@@ -390,6 +390,18 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   const oldestPostAt=postedTimes.length?postedTimes.sort()[0]:null;
   const summary={oldest_post_at:oldestPostAt,phase,items_seen:page.seen,items_eligible:counts.inserted+counts.duplicates+counts.insertErrors,inserted:counts.inserted,duplicates:counts.duplicates,insert_errors:counts.insertErrors,invalid_ids:page.invalid,out_of_window:page.outOfWindow,missing_timestamp:page.missingTimestamp,skipped:page.outOfWindow+page.invalid+counts.duplicates,failed_media:counts.failedMedia,window_error:plan&&!plan.ok?plan.error:null,cursor_retry:!!plan?.retry};
   await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,...summary}})});
+  // Chain one historical page only after the prior page has completed and advanced its cursor.
+  if(source&&phase==="simple"){
+    const nextSource={...source,...(simplePointerPatch||{})};
+    const mode=job.metadata?.mode;
+    const shouldContinue=mode==="newest"
+      ? !!nextSource.backfill_before&&nextSource.backfill_complete!==true
+      : mode==="history"&&simplePointerPatch?.backfill_complete!==true&&!!nextSource.backfill_before;
+    if(shouldContinue){
+      const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+      if(credentials.length)await startSimplePage(env,ctx,nextSource,credentials,"history",nextSource.backfill_before);
+    }
+  }
   // The job is completed before chaining so the active-run guard does not see this run.
   if(source&&plan?.ok){
     const next={...source,...plan.patch};
@@ -400,7 +412,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
     else if(phase==="incremental"&&next.backfill_complete!==true&&next.backfill_before)await chainNextDiscovery(env,ctx,next,"backfill");
   }
   // Fewer than 5 new posts in the newest 25: look deeper once, at the newest 100 (dedupe keeps only new ones).
-  if(phase==="incremental"&&counts.inserted<5&&!job.metadata?.deep_limit&&source&&!(await hasActiveDiscoveryForSource(env,ctx,source.id))){
+  if(phase==="incremental"&&counts.inserted<5&&!job.metadata?.deep_limit&&job.metadata?.phase!=="simple"&&source&&!(await hasActiveDiscoveryForSource(env,ctx,source.id))){
     try{
       const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
       // Skip the 25 already checked: ask the actor only for posts older than the oldest of them.
@@ -719,40 +731,38 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
 const SIMPLE_PAGE=10;
 // One Apify call for one page of 25 posts. mode "newest": no date filter. mode "history": only posts older than olderThan.
 async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode:"newest"|"history",olderThan:string|null){
-  let lastError="No Apify key could run the page.";
+  let lastError="No Apify key could start the page.";
   for(const credential of credentials){
     if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
+    let actorStarted=false;
     try{
       const secret=await decryptSecret(env,credential);
       const actorId=DEFAULT_APIFY_ACTOR;
       const actor=encodeURIComponent(actorId.replace("/","~"));
       const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,null,mode==="history"?olderThan:null);
-      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${SIMPLE_PAGE}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
-      const body:any=await response.json().catch(()=>null);
+      // Start asynchronously. Persist the Apify run ID before any dataset import so a Worker
+      // timeout/crash can never leave a running job with no way to recover its posts.
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&maxItems=${SIMPLE_PAGE}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
+      const body:any=await response.json().catch(()=>({}));
       if(!response.ok){lastError=body?.error?.message||`Apify returned ${response.status}.`;continue;}
-      const items:any[]=Array.isArray(body)?body:[];
+      const runId=body?.data?.id;
+      if(!runId){lastError="Apify accepted the page but did not return a run ID.";continue;}
+      actorStarted=true;
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:runId,attempt_count:0,max_attempts:5,metadata:{dataset_id:body.data?.defaultDatasetId||null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"simple",mode,window_newer_than:null,window_older_than:mode==="history"?olderThan:null}})});
+      if(!job?.[0]?.id)throw new Error("Apify started the page, but MemeOS could not save its run record. Check Apify runs before retrying to avoid duplicate usage.");
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"simple",mode,window_newer_than:null,window_older_than:mode==="history"?olderThan:null}})});
-      if(!job?.[0]?.id)throw new Error("Page fetched, but MemeOS could not save the discovery job.");
-      try{
-        return await runApifyPoll(env,ctx,job[0],items);
-      }catch(error:any){
-        const reason=`Import failed: ${String(error?.message||error).slice(0,300)}`;
-        console.error("Simple import failed", job[0].id, reason);
-        await db(env,"jobs",`?id=eq.${job[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:reason})}).catch((patchError:any)=>console.error("Could not record import failure", String(patchError?.message||patchError)));
-        throw error;
-      }
-    }catch(e:any){lastError=e?.message||lastError;}
+      return job[0];
+    }catch(e:any){
+      lastError=e?.message||lastError;
+      // Never start a second provider run after the first one has already started.
+      if(actorStarted)throw e;
+    }
   }
   throw new Error(`@${source.username}: ${lastError}`);
 }
-// Every cycle: check the newest 25 (imports anything new), then take the next older page of 25 until history ends.
+// Start the newest page; historical pages are chained only after the previous page is safely imported.
 async function runSimpleCycle(env:Env,ctx:Ctx,source:any,credentials:any[]){
-  await startSimplePage(env,ctx,source,credentials,"newest",null);
-  // History only runs once the newest page has set its starting pointer.
-  if(source.backfill_complete!==true&&source.backfill_before){
-    await startSimplePage(env,ctx,source,credentials,"history",source.backfill_before);
-  }
+  return await startSimplePage(env,ctx,source,credentials,"newest",null);
 }
 
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null,deepOlderThan?:string|null){
@@ -1713,13 +1723,13 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     for(const source of sources){
       try{
         if(await hasActiveDiscoveryForSource(env,ctx,source.id)){errors.push(`@${source.username}: a discovery run is already active; skipped a duplicate run.`);continue;}
-        await runSimpleCycle(env,ctx,source,creds);
-        jobs.push({username:source.username});
+        const job=await runSimpleCycle(env,ctx,source,creds);
+        jobs.push({job_id:job.id,provider_run_id:job.provider_run_id,source_username:source.username});
       }catch(e:any){errors.push(e?.message||String(e));}
     }
     if(!jobs.length)return fail(errors.join(" ")||"No source account could start a discovery run.",502);
     const settingsRow=await db(env,"user_settings",`?${userFilter(ctx)}&select=owner_id`);if(settingsRow.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:new Date().toISOString(),discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,last_discovery_started_at:new Date().toISOString(),discovery_interval_minutes:60,discovery_lock_until:null})});
-    return json({job_id:jobs[0]?.id,provider_run_id:jobs[0]?.provider_run_id,jobs:jobs.map((job:any)=>({job_id:job.id,provider_run_id:job.provider_run_id,source_username:job.metadata?.source_usernames?.[0]})),started:jobs.length,errors},202);
+    return json({job_id:jobs[0]?.job_id,provider_run_id:jobs[0]?.provider_run_id,jobs,started:jobs.length,errors},202);
   }
   return fail("Route not found.",404);
 }
