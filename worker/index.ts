@@ -196,6 +196,8 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // One-off pull of the newest posts for an account, used only to write publish dates onto existing rows.
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
+// Max new posts imported per poll (each costs several Worker subrequests; Cloudflare caps them per invocation).
+const MAX_IMPORTS_PER_POLL=4;
 // Deep incremental run: the newest 25 (already checked) plus the next 100. Posts already imported are skipped by dedupe.
 const INCREMENTAL_RUN_LIMIT=100;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
@@ -306,12 +308,16 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       if(row.source_post_id)knownKeys.add(String(row.source_post_id));
     }
   }
+  // Cloudflare caps subrequests per invocation. Each new post costs several (media, upload, insert),
+  // so a poll imports at most MAX_IMPORTS_PER_POLL posts and the rest are picked up by the next poll.
+  let partial=false;
   for (const entry of page.eligible) {
     const n = normalizeApifyItem(entry.item);
     if(knownKeys.size&&((entry.identity.key&&knownKeys.has(entry.identity.key))||(entry.identity.legacyIds||[]).some((id:string)=>knownKeys.has(id)))){counts.duplicates++;continue;}
     // Dedupe under every identity format this post may have been saved with; the DB unique index is the final guard.
     const clause=D.dedupeOrClause(entry.identity);
     if(clause){const found=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id&limit=1`);if(found.length){counts.duplicates++;continue;}}
+    if(counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;break;}
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
       try {
@@ -328,7 +334,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
         }
       } catch { counts.failedMedia++; }
     }
-    const src = await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent((n.username||"").replace(/^@/,""))}&select=id`);
+    const src=[{id:job.metadata?.source_reference_account_id||null}];
     const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:entry.identity.key,source_permalink:entry.identity.permalink||n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl,source_posted_at:entry.ts?new Date(entry.ts).toISOString():null};
     let createdId:string|null=null;
     try {
@@ -352,6 +358,12 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scrape_status:"error"})});
       console.error("Discovery window error",source.username,plan.error);
     }
+  }
+  if(partial){
+    // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
+    // skips the posts already imported, and continues with the rest.
+    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({metadata:{...job.metadata,dataset_id:datasetId,import_partial:true,last_import_batch:counts.inserted}})});
+    return {done:false,status:"importing",inserted:counts.inserted};
   }
   const postedTimes=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean) as string[];
   const oldestPostAt=postedTimes.length?postedTimes.sort()[0]:null;
