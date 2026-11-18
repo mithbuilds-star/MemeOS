@@ -207,3 +207,16 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 
 /* Selected value shown on the Posts/Day trigger (e.g. 2×) */
 .posts-per-day .dd-trigger > span:first-child{font-size:9px!important;font-weight:800;line-height:1}
+
+/* Discovery run progress card */
+.run-progress{display:grid;gap:8px;margin:12px 0 16px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--panel2);font-size:14px}
+.run-progress-head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.run-progress-head span{color:var(--muted)}
+.run-progress-meta{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:var(--muted)}
+.run-bar{position:relative;height:8px;border-radius:999px;background:var(--border);overflow:hidden}
+.run-bar>i{display:block;height:100%;width:0;background:var(--accent);border-radius:999px;transition:width .3s}
+.run-bar.indeterminate>i{position:absolute;width:35%;animation:run-slide 1.2s ease-in-out infinite}
+.run-progress.ok .run-bar>i{background:#3ecf8e}
+.run-progress.bad .run-bar>i{background:#e5484d}
+.run-progress-error{color:#e5484d;font-size:13px;word-break:break-word}
+@keyframes run-slide{0%{left:-35%}100%{left:100%}}
