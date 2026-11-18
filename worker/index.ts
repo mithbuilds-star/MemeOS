@@ -325,7 +325,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     if(createdId){try{await assignDiscoveredMeme(env,ctx,createdId,src[0]?.id||null);}catch(error:any){console.error("Discovery assignment failed",createdId,String(error?.message||error));}}
   }
   const sourceId=job.metadata?.source_reference_account_id;
-  const sourceRows=sourceId?await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,discovery_sweep_top`):[];
+  const sourceRows=sourceId?await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,discovery_sweep_top,reanchored_at,legacy_dated_at`):[];
   const source:any=sourceRows?.[0]||null;
   const jobCreatedMs=job.created_at?Date.parse(job.created_at):Date.now();
   // Cursor movement lives only in planAdvance: it never moves on partial insert failure or an ignored window.
