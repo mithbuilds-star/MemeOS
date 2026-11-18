@@ -1706,27 +1706,6 @@ export default {
     // Durable, bounded Apify polling. A failed transient attempt is rescheduled instead of
     // losing the run; terminal Apify statuses are marked failed by runApifyPoll.
     const now=new Date().toISOString();
-    // Sweep first: a running discovery job older than its time limit is failed here, even if its poll keeps
-    // dying before it reaches the age check. Otherwise one stuck job blocks every job behind it.
-    const stale = await db(env,"jobs",`?job_type=eq.discovery&status=in.(running,queued)&select=id,owner_id,created_at,provider_run_id,metadata`);
-    for (const old of stale) {
-      // Jobs that are importing in batches (4 posts per poll) legitimately take longer.
-      const limitMs = old.metadata?.import_partial ? 3*60*60*1000 : old.metadata?.phase==="dating" ? 90*60*1000 : old.metadata?.phase==="backfill" ? 20*60*1000 : 12*60*1000;
-      if (Date.now() - Date.parse(old.created_at) <= limitMs) continue;
-      // Over time, but the Apify run may already have posts waiting: import them before giving up on the job.
-      if (old.provider_run_id) {
-        try {
-          // done: imported. status "importing": partially imported, the next sweep continues it. Neither is a failure.
-          const result = await runApifyPoll(env,{userId:old.owner_id,token:""} as Ctx,old);
-          if (result?.done || result?.status === "importing") continue;
-        } catch (error:any) {
-          // A failed check-in is not a failed run: keep it running until it is far past its limit.
-          console.warn("Sweeper poll failed", old.id, String(error?.message||error));
-          if (Date.now() - Date.parse(old.created_at) <= 3*limitMs) continue;
-        }
-      }
-      await db(env,"jobs",`?id=eq.${old.id}&status=in.(running,queued)`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:now,locked_until:null,next_retry_at:null,last_error:"Discovery run exceeded its time limit and was failed by the sweeper so newer runs can proceed."})});
-    }
     // Newest first, so a stuck older job can never starve newer ones.
     const jobs = await db(env,"jobs",`?job_type=eq.discovery&status=in.(running,queued)&or=(next_retry_at.is.null,next_retry_at.lte.${encodeURIComponent(now)})&select=*&order=created_at.desc&limit=30`);
     let polledJobs=0;
