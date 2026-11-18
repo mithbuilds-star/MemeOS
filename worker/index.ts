@@ -198,6 +198,8 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 const DATING_RUN_LIMIT=1000;
 // Max new posts imported per poll (each costs several Worker subrequests; Cloudflare caps them per invocation).
 const MAX_IMPORTS_PER_POLL=4;
+// Historical (backfill) pages: 100 posts per page, so the actor's scan window reaches far enough back.
+const BACKFILL_RUN_LIMIT=100;
 // Deep incremental run: the newest 25 (already checked) plus the next 100. Posts already imported are skipped by dedupe.
 const INCREMENTAL_RUN_LIMIT=100;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
@@ -259,7 +261,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
   // One page per run, inside the window stored on this job.
-  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:(job.metadata?.deep_limit||SCRAPE_BATCH);
+  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:(job.metadata?.deep_limit||(job.metadata?.phase==="backfill"?BACKFILL_RUN_LIMIT:SCRAPE_BATCH));
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${itemsLimit}`,job);
   const items:any[]=await itemsRes.json();
   if(job.metadata?.phase==="dating"){
@@ -715,7 +717,9 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       // The actor ignores date windows on incremental runs, so take the newest posts and let dedupe keep only new ones.
       // First incremental run: newest 25. If fewer than 5 are new, a deep run takes the newest 100 (see poll).
       const isNewestRun=runPhase==="incremental";
-      const runLimit=isNewestRun&&deepLimit?deepLimit:SCRAPE_BATCH;
+      // Apify scans at most 10x resultsLimit (min 240) when a date filter is set, so a 25-post page
+      // can't reach past ~240 newer posts. Filtered-out posts are not charged, so historical pages use 100.
+      const runLimit=isNewestRun&&deepLimit?deepLimit:(runPhase==="backfill"?BACKFILL_RUN_LIMIT:SCRAPE_BATCH);
       const windowNewer=null;
       // A deep run asks the actor only for posts older than the oldest post the first run already checked.
       const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(isNewestRun?(deepLimit?deepOlderThan||null:null):(source.discovery_upper_bound||null));
