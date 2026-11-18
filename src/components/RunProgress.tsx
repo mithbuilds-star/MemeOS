@@ -22,21 +22,32 @@ export function RunProgress({ job }: { job: RunJob }) {
   const stuck = running && ageMs > STUCK_AFTER_MS;
   const minutes = Math.round(ageMs / 60000);
 
+  const total = Number(meta.items_total ?? NaN);
+  const processed = Number(meta.items_processed ?? NaN);
+  const importing = running && meta.import_partial === true && total > 0;
+
   let state = "Idle";
   let tone = "";
   let width = 0;
   let indeterminate = false;
+  let percent: string | null = null;
   if (job.status === "completed") {
     state = `Done: ${imported} imported, ${duplicates} already had`;
     width = 100;
+    percent = "100%";
     tone = "ok";
   } else if (job.status === "failed") {
     state = "Failed";
     tone = "bad";
     width = 100;
+  } else if (importing) {
+    // Importing: show how many of this run's posts have been handled so far.
+    width = Math.min(100, Math.round((processed / total) * 100));
+    percent = `${width}%`;
+    state = `Importing posts: ${processed} of ${total} handled, ${imported} new so far`;
   } else if (running) {
-    // Sync runs return all posts in one call, so the total is unknown until the response arrives.
-    state = "Waiting for Apify to finish the run, then importing its posts";
+    // Apify is still running; posts are only available once the run finishes.
+    state = "Apify run in progress. Posts appear here when it finishes.";
     indeterminate = true;
   }
 
@@ -51,6 +62,7 @@ export function RunProgress({ job }: { job: RunJob }) {
       </div>
       <div className="run-progress-meta">
         <span>{state}</span>
+        {percent && <span>{percent}</span>}
         {!Number.isNaN(fetched) && <span>{fetched} fetched</span>}
       </div>
       {job.last_error && <div className="run-progress-error">Error: {job.last_error}</div>}

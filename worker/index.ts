@@ -314,13 +314,14 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   // Cloudflare caps subrequests per invocation. Each new post costs several (media, upload, insert),
   // so a poll imports at most MAX_IMPORTS_PER_POLL posts and the rest are picked up by the next poll.
   let partial=false;
-  for (const entry of page.eligible) {
+  let processedIndex=0;
+  for (const [entryIndex, entry] of page.eligible.entries()) {
     const n = normalizeApifyItem(entry.item);
     if(knownKeys.size&&((entry.identity.key&&knownKeys.has(entry.identity.key))||(entry.identity.legacyIds||[]).some((id:string)=>knownKeys.has(id)))){counts.duplicates++;continue;}
     // Dedupe under every identity format this post may have been saved with; the DB unique index is the final guard.
     const clause=D.dedupeOrClause(entry.identity);
     if(clause){const found=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id&limit=1`);if(found.length){counts.duplicates++;continue;}}
-    if(!preItems&&counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;break;}
+    if(!preItems&&counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;processedIndex=entryIndex;break;}
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
       try {
@@ -365,7 +366,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   if(partial){
     // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
     // skips the posts already imported, and continues with the rest.
-    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({metadata:{...job.metadata,dataset_id:datasetId,import_partial:true,last_import_batch:counts.inserted}})});
+    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({metadata:{...job.metadata,dataset_id:datasetId,import_partial:true,last_import_batch:counts.inserted,items_total:page.eligible.length,items_processed:processedIndex}})});
     return {done:false,status:"importing",inserted:counts.inserted};
   }
   const postedTimes=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean) as string[];
