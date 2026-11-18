@@ -370,14 +370,23 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   let simplePointerPatch:any=null;
   if(source&&job.metadata?.phase==="simple"){
     if(job.metadata?.mode==="history"){
-      // Move the historical boundary from the oldest post that actually passed the
-      // requested date window, with a one-second overlap for equal-second posts.
-      if(page.inWindowCount===0&&items.length){
-        simplePointerPatch={backfill_complete:false,last_scrape_status:"error",backfill_stop_reason:"Actor returned no posts inside the requested older-than window; cursor held for inspection."};
-      }else if(items.length<SIMPLE_PAGE||page.oldestInWindowMs==null){
-        simplePointerPatch={backfill_complete:true,last_scrape_status:"completed"};
+      // A short response is terminal only when every returned record is valid,
+      // timestamped, and inside the requested window. Invalid IDs, missing
+      // timestamps, or actor-window mismatches must never mark history complete.
+      const previousBoundary=source.backfill_before?Date.parse(source.backfill_before):null;
+      if(items.length===0){
+        simplePointerPatch={backfill_complete:true,last_scrape_status:"completed",backfill_stop_reason:"The actor returned no older posts for this page."};
+      }else if(page.outOfWindow>0||page.missingTimestamp>0||page.inWindowCount===0||page.oldestInWindowMs==null){
+        simplePointerPatch={backfill_complete:false,last_scrape_status:"error",backfill_stop_reason:"Historical page contained records that could not be safely placed in the date window; cursor held for inspection."};
+      }else if(items.length<SIMPLE_PAGE&&page.invalid===0&&page.inWindowCount===items.length){
+        simplePointerPatch={backfill_complete:true,last_scrape_status:"completed",backfill_stop_reason:"The actor returned a clean page shorter than the 25-post limit."};
       }else{
-        simplePointerPatch={backfill_before:new Date(page.oldestInWindowMs+1000).toISOString(),backfill_complete:false,last_scrape_status:"completed"};
+        const nextBoundary=page.oldestInWindowMs+1000;
+        if(previousBoundary!=null&&nextBoundary>=previousBoundary){
+          simplePointerPatch={backfill_complete:false,last_scrape_status:"error",backfill_stop_reason:"Historical pagination made no progress; cursor held to prevent repeating the same page."};
+        }else{
+          simplePointerPatch={backfill_before:new Date(nextBoundary).toISOString(),backfill_complete:false,last_scrape_status:"completed",backfill_stop_reason:null};
+        }
       }
     } else {
       const newestPosted=page.newestInWindowMs==null?null:new Date(page.newestInWindowMs).toISOString();
@@ -419,7 +428,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
     const nextSource={...source,...(simplePointerPatch||{})};
     const mode=job.metadata?.mode;
     const shouldContinue=mode==="newest"
-      ? !!nextSource.backfill_before&&nextSource.backfill_complete!==true
+      ? counts.inserted<5&&!!nextSource.backfill_before&&nextSource.backfill_complete!==true
       : mode==="history"&&simplePointerPatch?.backfill_complete!==true&&simplePointerPatch?.last_scrape_status!=="error"&&!!nextSource.backfill_before;
     if(shouldContinue){
       const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
