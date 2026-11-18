@@ -178,7 +178,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
   const credential=rows?.[0];
   if(!credential)throw new Error("The Apify key that started this discovery run is no longer available. Re-enable or replace that exact key.");
   const secret=await decryptSecret(env,credential);
-  const response=await fetch(url,{headers:{Authorization:`Bearer ${secret}`},signal:AbortSignal.timeout(20000)});
+  const response=await fetch(url,{...init,headers:{...(init.headers||{}),Authorization:`Bearer ${secret}`},signal:init.signal||AbortSignal.timeout(20000)});
   if(!response.ok){
     const data:any=await response.clone().json().catch(()=>({}));
     const message=data.error?.message||`Apify returned ${response.status} while checking the original discovery run.`;
@@ -247,7 +247,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status)){
     // A profile page capped at 25 posts should never occupy a Worker job forever.
     // Check the actual Apify state first so a completed-but-unpolled run is still imported.
-    const isBackfill=job.metadata?.phase==="backfill";
     const maxAgeMs=isBackfill?20*60*1000:(job.metadata?.phase==="dating"?90*60*1000:12*60*1000);
     const ageMs=job.created_at?Date.now()-Date.parse(job.created_at):0;
     if(Number.isFinite(ageMs)&&ageMs>maxAgeMs){
@@ -370,12 +369,19 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   }
   let simplePointerPatch:any=null;
   if(source&&job.metadata?.phase==="simple"){
-    const oldestPosted=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean).sort()[0];
     if(job.metadata?.mode==="history"){
-      // A short or empty page means history has ended; otherwise the pointer moves to the oldest post seen.
-      simplePointerPatch=(items.length<SIMPLE_PAGE||!oldestPosted)?{backfill_complete:true,last_scrape_status:"completed"}:{backfill_before:oldestPosted,backfill_complete:false,last_scrape_status:"completed"};
+      // Move the historical boundary from the oldest post that actually passed the
+      // requested date window, with a one-second overlap for equal-second posts.
+      if(page.inWindowCount===0&&items.length){
+        simplePointerPatch={backfill_complete:false,last_scrape_status:"error",backfill_stop_reason:"Actor returned no posts inside the requested older-than window; cursor held for inspection."};
+      }else if(items.length<SIMPLE_PAGE||page.oldestInWindowMs==null){
+        simplePointerPatch={backfill_complete:true,last_scrape_status:"completed"};
+      }else{
+        simplePointerPatch={backfill_before:new Date(page.oldestInWindowMs+1000).toISOString(),backfill_complete:false,last_scrape_status:"completed"};
+      }
     } else {
-      const newestPosted=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean).sort().at(-1)||null;
+      const newestPosted=page.newestInWindowMs==null?null:new Date(page.newestInWindowMs).toISOString();
+      const oldestPosted=page.oldestInWindowMs==null?null:new Date(page.oldestInWindowMs).toISOString();
       if(newestPosted){
         simplePointerPatch={last_scraped_at:newestPosted,...(!source.backfill_before&&oldestPosted?{backfill_before:oldestPosted}:{}),last_scrape_status:"completed"};
       }
@@ -744,7 +750,10 @@ async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode
       const secret=await decryptSecret(env,credential);
       const actorId=DEFAULT_APIFY_ACTOR;
       const actor=encodeURIComponent(actorId.replace("/","~"));
-      const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,mode==="newest"?newerThan:null,mode==="history"?olderThan:null);
+      // Instagram timestamps are second-precision. Re-scan a one-second overlap and
+      // enforce the exact cursor locally so same-second posts are not silently skipped.
+      const effectiveNewerThan=mode==="newest"&&newerThan?new Date(Date.parse(newerThan)-1000).toISOString():null;
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,effectiveNewerThan,mode==="history"?olderThan:null);
       // Start asynchronously. Persist the Apify run ID before any dataset import so a Worker
       // timeout/crash can never leave a running job with no way to recover its posts.
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&maxItems=${SIMPLE_PAGE}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
@@ -753,7 +762,7 @@ async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode
       const runId=body?.data?.id;
       if(!runId){lastError="Apify accepted the page but did not return a run ID.";continue;}
       actorStarted=true;
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:runId,attempt_count:0,max_attempts:5,metadata:{dataset_id:body.data?.defaultDatasetId||null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"simple",mode,window_newer_than:null,window_older_than:mode==="history"?olderThan:null}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:runId,attempt_count:0,max_attempts:5,metadata:{dataset_id:body.data?.defaultDatasetId||null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"simple",mode,window_newer_than:effectiveNewerThan,window_older_than:mode==="history"?olderThan:null}})});
       if(!job?.[0]?.id)throw new Error("Apify started the page, but MemeOS could not save its run record. Check Apify runs before retrying to avoid duplicate usage.");
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
       return job[0];
@@ -1795,7 +1804,7 @@ export default {
       const ctx:Ctx={userId:job.owner_id,token:""};
       try {
         const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)continue;
-        const lease=await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}&status=in.(running,queued)&or=(locked_until.is.null,locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({last_attempt_at:now,locked_until:new Date(Date.now()+12*60*1000).toISOString()})});
+        const lease=await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}&status=in.(running,queued)&or=(locked_until.is.null,locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({last_attempt_at:now,locked_until:new Date(Date.now()+90*1000).toISOString()})});
         if(!lease?.length)continue;
         polledJobs++;
         const result=await runApifyPoll(env,ctx,{...job,...lease[0]});
