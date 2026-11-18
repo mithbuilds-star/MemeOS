@@ -233,7 +233,11 @@ async function chainNextDiscovery(env:Env,ctx:Ctx,source:any,phase:"incremental"
 
 async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   const runId=job.provider_run_id;
-  if(!runId&&!preItems)throw new Error("Discovery job has no Apify run ID.");
+  if(!runId&&!preItems){
+    // Nothing to resume from: a one-call run that failed mid-import has no run ID. Fail it clearly.
+    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:"Import failed before the posts were saved. Start a new run."})});
+    return {done:true,status:"FAILED"};
+  }
   // Sync runs already hold their posts, so there is no status check to make.
   const statusRes=preItems?null:await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
   const statusData:any=statusRes?await statusRes.json().catch(()=>({})):{data:{status:"SUCCEEDED",defaultDatasetId:null}};
@@ -745,7 +749,13 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase:runPhase,backfill_before:runPhase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null,deep_limit:isNewestRun&&deepLimit?deepLimit:null}})});
       if(!job?.[0]?.id)throw new Error("Apify finished, but MemeOS could not save the discovery job.");
       // Import the posts that came back in this same response.
-      return await runApifyPoll(env,ctx,job[0],syncItems);
+      try {
+        return await runApifyPoll(env,ctx,job[0],syncItems);
+      } catch (error:any) {
+        // The posts were in this response only, so the run cannot be retried. Fail it now instead of leaving it running.
+        await db(env,"jobs",`?id=eq.${job[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,200)}. Start a new run.`})}).catch(()=>{});
+        throw error;
+      }
     }catch(e:any){lastError=e?.message||lastError;}
   }
   throw new Error(`@${source.username}: ${lastError}`);
