@@ -194,6 +194,8 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 }
 
 // One-off pull of the newest posts for an account, used only to write publish dates onto existing rows.
+// Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
+const DATING_RUN_LIMIT=1000;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
   let lastError="No Apify key could start the dating run.";
   for(const credential of credentials){
@@ -202,8 +204,8 @@ async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
       const secret=await decryptSecret(env,credential);
       const actorId=DEFAULT_APIFY_ACTOR;
       const actor=encodeURIComponent(actorId.replace("/","~"));
-      const input=buildActorInput(credential.actor_input,[source.username],actorId,100,null,null);
-      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=600&maxItems=100`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,DATING_RUN_LIMIT,null,null);
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=600&maxItems=${DATING_RUN_LIMIT}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){lastError=result.error?.message||`Apify returned ${response.status}.`;continue;}
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
@@ -253,7 +255,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
   // One page per run, inside the window stored on this job.
-  const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`,job);
+  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:SCRAPE_BATCH;
+  const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${itemsLimit}`,job);
   const items:any[]=await itemsRes.json();
   if(job.metadata?.phase==="dating"){
     // Resumable: each attempt patches at most DATING_PATCH_LIMIT rows, then reschedules itself.
