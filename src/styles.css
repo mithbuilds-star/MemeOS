@@ -206,4 +206,4 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 .dd-menu-portal .dd-list{max-height:min(280px,calc(100vh - 110px))}
 
 /* Selected value shown on the Posts/Day trigger (e.g. 2×) */
-.posts-per-day .dd-trigger > span:first-child{font-size:20px!important;font-weight:700;line-height:1}
+.posts-per-day .dd-trigger > span:first-child{font-size:9px!important;font-weight:800;line-height:1}
