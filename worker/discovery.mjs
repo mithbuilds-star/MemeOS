@@ -191,7 +191,19 @@ export function planAdvance(phase, source, page, jobCreatedMs) {
     return { ok: true, complete: false, patch: { backfill_before: iso(next), backfill_pages: pages, backfill_complete: false, last_scrape_status: "backfilling" } };
   }
 
-  // Incremental.
+  if (phase === "newest") {
+    // Newest-first run: the actor returned the newest posts (no date window). That page is the whole sweep,
+    // so the cursor moves to the newest post seen and no catch-up is chained. Full pages are not "more to fetch".
+    // A deep run (older-than window) can only return posts below the cursor, so max() keeps the cursor.
+    const cursor = ms(source.last_scraped_at);
+    const top = Math.max(cursor ?? -Infinity, page.newestInWindowMs ?? -Infinity);
+    const patch = { discovery_upper_bound: null, discovery_sweep_top: null, last_scrape_status: "completed" };
+    if (Number.isFinite(top)) patch.last_scraped_at = iso(top);
+    if (cursor == null && !source.backfill_before && page.oldestInWindowMs != null) patch.backfill_before = iso(page.oldestInWindowMs);
+    return { ok: true, complete: true, patch };
+  }
+
+  // Incremental (legacy window-based path, kept for tests and older jobs).
   const cursor = ms(source.last_scraped_at);
   const upper = ms(source.discovery_upper_bound);
   const sweepTop = ms(source.discovery_sweep_top);

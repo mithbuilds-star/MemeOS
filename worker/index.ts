@@ -331,7 +331,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // Cursor movement lives only in planAdvance: it never moves on partial insert failure or an ignored window.
   let plan:any=null;
   if(source){
-    plan=D.planAdvance(phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors,inserted:counts.inserted},jobCreatedMs);
+    // Incremental jobs always fetch newest-first (no date window), so they use the "newest" rule: no catch-up chaining.
+    plan=D.planAdvance(phase==="incremental"?"newest":phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors,inserted:counts.inserted},jobCreatedMs);
     if(plan.ok) await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(plan.patch)});
     else {
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scrape_status:"error"})});
