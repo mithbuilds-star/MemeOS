@@ -1,7 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronDown, Search } from "lucide-react";
 
 export type SelectOption = { value: string; label: string };
+
+type MenuPos = { top: number; left: number; width: number; up: boolean };
 
 export function Select({ value, onChange, options, placeholder = "Select", disabled = false, defaultValue, defaultLabel, searchable = true }: {
   value: string;
@@ -16,7 +19,10 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const [pos, setPos] = useState<MenuPos | null>(null);
   const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const listId = useId();
   const displayOptions = useMemo(() => {
     if (defaultValue === undefined) return options;
@@ -35,10 +41,35 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
     [displayOptions, query]
   );
 
+  // The menu is portaled to <body> and positioned from the trigger, so parents with
+  // overflow:hidden or scroll containers can never clip it. It opens upward when there
+  // is more room above than below.
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const place = () => {
+      const r = trigger.current?.getBoundingClientRect();
+      if (!r) return;
+      const wanted = Math.min(menu.current?.offsetHeight || 320, 360);
+      const below = window.innerHeight - r.bottom - 8;
+      const above = r.top - 8;
+      const up = below < wanted && above > below;
+      setPos({ top: up ? r.top - 6 : r.bottom + 6, left: r.left, width: r.width, up });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, filtered.length]);
+
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
-      if (root.current && !root.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (root.current?.contains(target) || menu.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
@@ -66,9 +97,21 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
     if (e.key === "Enter") { e.preventDefault(); if (filtered[active]) choose(filtered[active]); }
   };
 
+  const menuStyle: React.CSSProperties | undefined = pos
+    ? {
+        position: "fixed",
+        left: pos.left,
+        width: pos.width,
+        right: "auto",
+        top: pos.up ? "auto" : pos.top,
+        bottom: pos.up ? window.innerHeight - pos.top : "auto",
+      }
+    : { visibility: "hidden", position: "fixed", top: 0, left: 0 };
+
   return (
     <div className="dd" ref={root} onKeyDown={onKey}>
       <button
+        ref={trigger}
         type="button"
         className={`dd-trigger${open ? " open" : ""}`}
         disabled={disabled}
@@ -78,13 +121,20 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
         onClick={() => { setOpen(!open); setActive(0); }}
       >
         <span className={selected ? "" : "dd-placeholder"}>{selected ? selected.label : placeholder}</span>
-        <ChevronDown size={16} className="dd-chevron" />
+        <ChevronDown size={18} className="dd-chevron" />
       </button>
-      {open && (
-        <div className="dd-menu" id={listId} role="listbox" aria-label={placeholder}>
+      {open && createPortal(
+        <div
+          ref={menu}
+          className={`dd-menu dd-menu-portal${pos?.up ? " up" : ""}`}
+          style={menuStyle}
+          id={listId}
+          role="listbox"
+          aria-label={placeholder}
+        >
           {searchable && displayOptions.length > 8 && (
             <div className="dd-search-wrap">
-              <Search size={14} />
+              <Search size={15} />
               <input
                 className="dd-search"
                 autoFocus
@@ -106,11 +156,12 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
                 onMouseDown={(e) => { e.preventDefault(); choose(o); }}
               >
                 <span>{o.label}</span>
-                {o.value === value && <Check size={14} />}
+                {o.value === value && <Check size={16} />}
               </div>
             ))}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
