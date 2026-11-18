@@ -1711,7 +1711,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     for(const source of sources){
       try{
         if(await hasActiveDiscoveryForSource(env,ctx,source.id)){errors.push(`@${source.username}: a discovery run is already active; skipped a duplicate run.`);continue;}
-        jobs.push(await startApifyDiscoveryForSource(env,ctx,source,creds,false));
+        await runSimpleCycle(env,ctx,source,creds);
+        jobs.push({username:source.username});
       }catch(e:any){errors.push(e?.message||String(e));}
     }
     if(!jobs.length)return fail(errors.join(" ")||"No source account could start a discovery run.",502);
