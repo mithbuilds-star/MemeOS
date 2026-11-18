@@ -1,4 +1,5 @@
 import * as L from "./lifecycle.mjs";
+import * as D from "./discovery.mjs";
 export interface Env {
   ASSETS: Fetcher;
   SUPABASE_URL: string;
@@ -104,8 +105,10 @@ function normalizeApifyItem(item: any) {
   // ("post") from the actual Instagram media type ("IMAGE", "REEL", etc.).
   const rawUsername = firstString(item,["owner.username","ownerUsername","username","author.username","user.username","input"]);
   const username = rawUsername?rawUsername.replace(/^@/,"").toLowerCase():null;
-  const permalink = firstString(item,["url","permalink","postUrl","post_url"]);
-  const postId = firstString(item,["id","shortCode","shortcode","postId","pk"]) || permalink;
+  // Canonical Instagram shortcode identity (see worker/discovery.mjs).
+  const identity = D.discoveryIdentity(item);
+  const permalink = identity.permalink;
+  const postId = identity.key;
   const image = firstString(item,["media.displayUrl","media.thumbnailUrl","displayUrl","display_url","imageUrl","image_url","thumbnailUrl","images.0.url"]);
   const caption = firstString(item,["caption","text","description","alt"]);
   const type = firstString(item,["mediaType","productType","type"]) || "IMAGE";
@@ -190,6 +193,14 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
   return response;
 }
 
+async function chainNextDiscovery(env:Env,ctx:Ctx,source:any,phase:"incremental"|"backfill"){
+  if(await hasActiveDiscoveryForSource(env,ctx,source.id))return;
+  const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+  if(!credentials.length)return;
+  try{await startApifyDiscoveryForSource(env,ctx,source,credentials,false,phase,phase==="backfill"?source.backfill_before:null);}
+  catch(error:any){console.error("Chained discovery start failed",source.username,String(error?.message||error));}
+}
+
 async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const runId=job.provider_run_id;
   if(!runId)throw new Error("Discovery job has no Apify run ID.");
@@ -219,37 +230,18 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   }
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
-  // Every discovery run is deliberately capped at one 25-post page.
+  // One page per run, inside the window stored on this job.
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`,job);
   const items:any[]=await itemsRes.json();
-  // Backfill runs are bounded by the oldest post in the incremental result.
-  // The official Apify actor has no onlyPostsOlderThan input, so enforce the
-  // cutoff locally after fetching its maximum timeline; compatible custom actors
-  // can also apply the same cutoff server-side.
-  const backfillBefore=isBackfill&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
-  // Apply the exact saved timestamp locally as a second guard. Coregent accepts
-  // ISO date-times for both newer-than and older-than filters; truncating the
-  // incremental cursor to a calendar day caused the same day's posts to be
-  // fetched repeatedly and then counted as duplicates on every run.
-  const incrementalCursor=!isBackfill&&job.metadata?.last_successful_scrape_at
-    ?Date.parse(job.metadata.last_successful_scrape_at):null;
-  const batch=isBackfill&&backfillBefore
-    ?items.filter((item:any)=>{
-      const postedAt=normalizeApifyItem(item).postedAt;
-      return !!postedAt&&Date.parse(postedAt)<backfillBefore;
-    })
-    :Number.isFinite(incrementalCursor)
-      ?items.filter((item:any)=>{
-        const postedAt=normalizeApifyItem(item).postedAt;
-        return !!postedAt&&Date.parse(postedAt)>incrementalCursor!;
-      })
-      :items;
-  let inserted=0,skipped=items.length-batch.length,failedMedia=0,duplicates=0,invalidIds=0,insertErrors=0;
-  for (const item of batch) {
-    const n = normalizeApifyItem(item);
-    if (!n.postId) { skipped++; invalidIds++; continue; }
-    const exists = await db(env,"memes",`?${userFilter(ctx)}&source_post_id=eq.${encodeURIComponent(n.postId)}&select=id`);
-    if (exists.length) { skipped++; duplicates++; continue; }
+  const phase=isBackfill?"backfill":"incremental";
+  const window={newerThan:job.metadata?.window_newer_than?Date.parse(job.metadata.window_newer_than):null,olderThan:job.metadata?.window_older_than?Date.parse(job.metadata.window_older_than):null};
+  const page=D.classifyPage(items,window,{parseTs:(item:any)=>{const value=normalizeApifyItem(item).postedAt;return value?Date.parse(value):null;}});
+  const counts={inserted:0,duplicates:0,insertErrors:0,failedMedia:0};
+  for (const entry of page.eligible) {
+    const n = normalizeApifyItem(entry.item);
+    // Dedupe under every identity format this post may have been saved with; the DB unique index is the final guard.
+    const clause=D.dedupeOrClause(entry.identity);
+    if(clause){const found=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id&limit=1`);if(found.length){counts.duplicates++;continue;}}
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
       try {
@@ -264,60 +256,45 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
           assetPath = `${ctx.userId}/discovered/${crypto.randomUUID()}.${ext}`;
           const mediaBytes=await readBoundedBody(media,10*1024*1024);assetUrl = await storageUpload(env,assetPath,mediaBytes.buffer as ArrayBuffer,ct);
         }
-      } catch { failedMedia++; }
+      } catch { counts.failedMedia++; }
     }
     const src = await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent((n.username||"").replace(/^@/,""))}&select=id`);
-    const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:n.postId,source_permalink:n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl};
-    try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch (error:any) { skipped++; insertErrors++; console.error("Discovery meme insert failed",n.postId,String(error?.message||error)); }
+    const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:entry.identity.key,source_permalink:entry.identity.permalink||n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl};
+    let createdId:string|null=null;
+    try {
+      // ignore-duplicates: a row that already exists returns [] instead of failing, so concurrent runs cannot double insert.
+      const created=await db(env,"memes","?on_conflict=owner_id,source_post_id",{method:"POST",headers:{Prefer:"return=representation,resolution=ignore-duplicates"},body:JSON.stringify(payload)});
+      if(!created?.length){counts.duplicates++;} else {counts.inserted++; createdId=created[0].id||null;}
+    } catch (error:any) { counts.insertErrors++; console.error("Discovery meme insert failed",entry.identity.key,String(error?.message||error)); }
+    if(createdId){try{await assignDiscoveredMeme(env,ctx,createdId,src[0]?.id||null);}catch(error:any){console.error("Discovery assignment failed",createdId,String(error?.message||error));}}
   }
-  const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];
+
+  }
   const sourceId=job.metadata?.source_reference_account_id;
-  let source:any=null;
-  if(sourceId){
-    const sourceRows=await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete`);
-    source=sourceRows?.[0]||null;
-  }
+  const sourceRows=sourceId?await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,discovery_sweep_top`):[];
+  const source:any=sourceRows?.[0]||null;
+  const jobCreatedMs=job.created_at?Date.parse(job.created_at):Date.now();
+  // Cursor movement lives only in planAdvance: it never moves on partial insert failure or an ignored window.
+  let plan:any=null;
   if(source){
-    if(isBackfill){
-      const timestamps=batch.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
-      const oldest=timestamps.length?new Date(Math.min(...timestamps)).toISOString():null;
-      // A short eligible page means the actor reached the end of the available history.
-      // Persist the exact timestamp (not just the calendar date) so same-day posts
-      // are not skipped by the next page.
-      const complete=batch.length<SCRAPE_BATCH||!oldest;
-      await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({backfill_before:oldest||job.metadata?.backfill_before||source.backfill_before,backfill_complete:complete,last_scrape_status:"completed"})});
-    }else{
-      const timestamps=batch.map((item:any)=>normalizeApifyItem(item).postedAt).filter(Boolean).map((value:string)=>Date.parse(value)).filter(Number.isFinite);
-      const oldest=timestamps.length?new Date(Math.min(...timestamps)).toISOString():null;
-      // Seed the historical cursor from the oldest post in the first bounded
-      // incremental page. Existing accounts fall back to their prior scrape time.
-      const backfillBefore=source.backfill_before||oldest||job.metadata?.last_successful_scrape_at||job.created_at||null;
-      const cursorAt=job.created_at||new Date().toISOString();
-      await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed",...(backfillBefore?{backfill_before:backfillBefore}:{})})});
-      // Fewer than five successfully inserted (non-duplicate) posts is the signal
-      // to fetch the next historical page. This starts exactly one 25-post page; the next page is
-      // only requested after a later incremental scan again finds <5 new posts.
-      if(inserted<SCRAPE_BACKFILL_THRESHOLD&&backfillBefore&&!source.backfill_complete){
-        const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(source.id)}&metadata->>phase=eq.backfill&select=id&limit=1`);
-        if(!active.length){
-          const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
-          if(credentials.length){
-            try{await startApifyDiscoveryForSource(env,ctx,source,credentials,false,"backfill",backfillBefore);}
-            catch(error:any){console.error("Historical backfill start failed",source.username,String(error?.message||error));}
-          }
-        }
-      }
-    }
-  }else if(!isBackfill){
-    const cursorAt=job.created_at||new Date().toISOString();
-    for(const username of sourceNames){
-      const sourceRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent(String(username).replace(/^@/,""))}&select=id`);
-      for(const row of sourceRows)await db(env,"reference_accounts",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scraped_at:cursorAt,last_scrape_status:"completed"})});
+    plan=D.planAdvance(phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors},jobCreatedMs);
+    if(plan.ok) await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(plan.patch)});
+    else {
+      await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scrape_status:"error"})});
+      console.error("Discovery window error",source.username,plan.error);
     }
   }
-  await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,items_eligible:batch.length,inserted,skipped,duplicates,invalid_ids:invalidIds,insert_errors:insertErrors,failed_media:failedMedia}})});
+  const summary={phase,items_seen:page.seen,items_eligible:counts.inserted+counts.duplicates+counts.insertErrors,inserted:counts.inserted,duplicates:counts.duplicates,insert_errors:counts.insertErrors,invalid_ids:page.invalid,out_of_window:page.outOfWindow,missing_timestamp:page.missingTimestamp,skipped:page.outOfWindow+page.invalid+counts.duplicates,failed_media:counts.failedMedia,window_error:plan&&!plan.ok?plan.error:null,cursor_retry:!!plan?.retry};
+  await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,...summary}})});
+  // The job is completed before chaining so the active-run guard does not see this run.
+  if(source&&plan?.ok){
+    const next={...source,...plan.patch};
+    if(phase==="incremental"&&next.discovery_upper_bound)await chainNextDiscovery(env,ctx,next,"incremental");
+    else if(phase==="backfill"&&plan.complete===false)await chainNextDiscovery(env,ctx,next,"backfill");
+    else if(phase==="incremental"&&next.backfill_complete!==true&&next.backfill_before)await chainNextDiscovery(env,ctx,next,"backfill");
+  }
   await refreshAllCredentialUsage(env,ctx);
-  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${items.length}, imported ${inserted}, duplicates ${duplicates}, invalid IDs ${invalidIds}, insert errors ${insertErrors}, media unavailable ${failedMedia}.`,inserted,{items_seen:items.length,items_eligible:batch.length,inserted,skipped,duplicates,invalid_ids:invalidIds,insert_errors:insertErrors,failed_media:failedMedia,source_usernames:sourceNames,phase:isBackfill?"backfill":"incremental"});
+  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${page.seen}, imported ${counts.inserted}, duplicates ${counts.duplicates}, out of window ${page.outOfWindow}, invalid IDs ${page.invalid}, insert errors ${counts.insertErrors}, media unavailable ${counts.failedMedia}.`,counts.inserted,summary);  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${items.length}, imported ${inserted}, duplicates ${duplicates}, invalid IDs ${invalidIds}, insert errors ${insertErrors}, media unavailable ${failedMedia}.`,inserted,{items_seen:items.length,items_eligible:batch.length,inserted,skipped,duplicates,invalid_ids:invalidIds,insert_errors:insertErrors,failed_media:failedMedia,source_usernames:sourceNames,phase:isBackfill?"backfill":"incremental"});
   return {done:true,status:"SUCCEEDED",items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia};
 }
 
@@ -620,7 +597,6 @@ async function runWaitingReels(env:Env){
 
 const DEFAULT_APIFY_ACTOR = "coregent/instagram-posts-scraper";
 const SCRAPE_BATCH=25;
-const SCRAPE_BACKFILL_THRESHOLD=5;
 
 async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
   const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
@@ -639,9 +615,11 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       const actor=encodeURIComponent(actorId.replace("/","~"));
       // Incremental runs look forward from last_scraped_at. Backfill runs look
       // backward from the exact timestamp saved after the previous 25-post page.
-      const input=phase==="backfill"
-        ?buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,null,backfillBefore||source.backfill_before)
-        :buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,source.last_scraped_at||null);
+      // Each account has its own window: incremental = (last_scraped_at, discovery_upper_bound),
+      // backfill = (-inf, backfill_before). Windows are stored on the job so polling uses the same one.
+      const windowNewer=phase==="backfill"?null:(source.last_scraped_at||null);
+      const windowOlder=phase==="backfill"?(backfillBefore||source.backfill_before||null):(source.discovery_upper_bound||null);
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,windowNewer,windowOlder);
       // Hard-cap runtime and billable results. Historical filtering may page past newer posts.
       const runTimeoutSeconds=phase==="backfill"?900:600;
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=${runTimeoutSeconds}&maxItems=${SCRAPE_BATCH}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
@@ -656,7 +634,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase,backfill_before:phase==="backfill"?(backfillBefore||source.backfill_before||null):null,last_successful_scrape_at:source.last_scraped_at||null}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase,backfill_before:phase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null}})});
       if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
       return job[0];
     }catch(e:any){lastError=e?.message||lastError;}
@@ -680,7 +658,6 @@ function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_A
   if(olderThan){
     const parsed=new Date(olderThan);
     if(!Number.isNaN(parsed.getTime())){
-      delete input.postsNewerThan;
       input.postsOlderThan=parsed.toISOString();
     }
   }
@@ -812,7 +789,7 @@ async function runScheduledDiscovery(env:Env){
     const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&discovery_enabled=eq.true&select=id`);if(!accounts.length)continue;
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let all=false;for(const a of accounts){const own=mappings.filter((m:any)=>m.destination_account_id===a.id);if(!own.length)all=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete`);
+    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound`);
     const selected=all?sources:sources.filter((s:any)=>allowed.has(s.id));if(!selected.length)continue;
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)continue;
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
@@ -1558,7 +1535,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!activeAccounts.length)return fail("Enable discovery on at least one destination account first.");
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let allSources=false;for(const account of activeAccounts){const own=mappings.filter((m:any)=>m.destination_account_id===account.id);if(!own.length)allSources=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at`);
+    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound`);
     const sources=allSources?allSourcesRows:allSourcesRows.filter((source:any)=>allowed.has(source.id));
     if(!sources.length)return fail("Add or assign at least one enabled reference account to a destination with discovery enabled.");
     const jobs:any[]=[];const errors:string[]=[];
