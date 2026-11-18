@@ -374,17 +374,22 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
     if(job.metadata?.mode==="history"){
       // A short or empty page means history has ended; otherwise the pointer moves to the oldest post seen.
       simplePointerPatch=(items.length<SIMPLE_PAGE||!oldestPosted)?{backfill_complete:true,last_scrape_status:"completed"}:{backfill_before:oldestPosted,backfill_complete:false,last_scrape_status:"completed"};
-    } else if(!source.backfill_before&&oldestPosted){
-      // Newest page on a fresh account: its oldest post is where history starts.
-      simplePointerPatch={backfill_before:oldestPosted,last_scrape_status:"completed"};
+    } else {
+      const newestPosted=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean).sort().at(-1)||null;
+      if(newestPosted){
+        simplePointerPatch={last_scraped_at:newestPosted,...(!source.backfill_before&&oldestPosted?{backfill_before:oldestPosted}:{}),last_scrape_status:"completed"};
+      }
     }
-    if(simplePointerPatch)await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(simplePointerPatch)});
   }
   if(partial){
     // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
     // skips the posts already imported, and continues with the rest.
     await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({metadata:{...job.metadata,dataset_id:datasetId,import_partial:true,last_import_batch:counts.inserted,items_total:page.eligible.length,items_processed:processedIndex}})});
     return {done:false,status:"importing",inserted:counts.inserted};
+  }
+  // Move cursors only after every item in the dataset has been imported or deduplicated.
+  if(source&&job.metadata?.phase==="simple"&&simplePointerPatch){
+    await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(simplePointerPatch)});
   }
   const postedTimes=items.map((item)=>normalizeApifyItem(item).postedAt).filter(Boolean) as string[];
   const oldestPostAt=postedTimes.length?postedTimes.sort()[0]:null;
@@ -730,7 +735,7 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
 }
 const SIMPLE_PAGE=25;
 // One Apify call for one page of 25 posts. mode "newest": no date filter. mode "history": only posts older than olderThan.
-async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode:"newest"|"history",olderThan:string|null){
+async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode:"newest"|"history",olderThan:string|null,newerThan:string|null=null){
   let lastError="No Apify key could start the page.";
   for(const credential of credentials){
     if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
@@ -739,7 +744,7 @@ async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode
       const secret=await decryptSecret(env,credential);
       const actorId=DEFAULT_APIFY_ACTOR;
       const actor=encodeURIComponent(actorId.replace("/","~"));
-      const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,null,mode==="history"?olderThan:null);
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,mode==="newest"?newerThan:null,mode==="history"?olderThan:null);
       // Start asynchronously. Persist the Apify run ID before any dataset import so a Worker
       // timeout/crash can never leave a running job with no way to recover its posts.
       const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&maxItems=${SIMPLE_PAGE}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
@@ -762,7 +767,9 @@ async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode
 }
 // Start the newest page; historical pages are chained only after the previous page is safely imported.
 async function runSimpleCycle(env:Env,ctx:Ctx,source:any,credentials:any[]){
-  return await startSimplePage(env,ctx,source,credentials,"newest",null);
+  // Incremental newest-page runs must use the account cursor; otherwise every run
+  // downloads the same newest posts and reports them as duplicates.
+  return await startSimplePage(env,ctx,source,credentials,"newest",null,source.last_scraped_at||null);
 }
 
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null,deepOlderThan?:string|null){
