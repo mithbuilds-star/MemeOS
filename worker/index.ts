@@ -728,7 +728,7 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
   const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
   return active.length>0;
 }
-const SIMPLE_PAGE=10;
+const SIMPLE_PAGE=25;
 // One Apify call for one page of 25 posts. mode "newest": no date filter. mode "history": only posts older than olderThan.
 async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode:"newest"|"history",olderThan:string|null){
   let lastError="No Apify key could start the page.";
