@@ -1715,8 +1715,9 @@ export default {
       // Over time, but the Apify run may already have posts waiting: import them before giving up on the job.
       if (old.provider_run_id) {
         try {
-          const done = await runApifyPoll(env,{userId:old.owner_id,token:""} as Ctx,old);
-          if (done?.done) continue;
+          // done: imported. status "importing": partially imported, the next sweep continues it. Neither is a failure.
+          const result = await runApifyPoll(env,{userId:old.owner_id,token:""} as Ctx,old);
+          if (result?.done || result?.status === "importing") continue;
         } catch (error:any) {
           console.warn("Sweeper poll failed", old.id, String(error?.message||error));
         }
