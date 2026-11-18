@@ -293,8 +293,22 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const window={newerThan:job.metadata?.window_newer_than?Date.parse(job.metadata.window_newer_than):null,olderThan:job.metadata?.window_older_than?Date.parse(job.metadata.window_older_than):null};
   const page=D.classifyPage(items,window,{parseTs:(item:any)=>{const value=normalizeApifyItem(item).postedAt;return value?Date.parse(value):null;}});
   const counts={inserted:0,duplicates:0,insertErrors:0,failedMedia:0};
+  // One query loads this account's known post identities, so duplicates are checked in memory
+  // instead of one database call per post (a 100-post run used to make 100+ calls in one Worker invocation).
+  const knownKeys=new Set<string>();
+  const sourceRef=job.metadata?.source_reference_account_id;
+  if(page.eligible.length&&sourceRef){
+    const known=await db(env,"memes",`?${userFilter(ctx)}&source_reference_account_id=eq.${encodeURIComponent(sourceRef)}&select=source_post_id,source_permalink&limit=2000`);
+    for(const row of known){
+      const k=D.discoveryIdentity({url:row.source_permalink,id:row.source_post_id});
+      if(k.key)knownKeys.add(k.key);
+      for(const legacy of k.legacyIds||[])knownKeys.add(legacy);
+      if(row.source_post_id)knownKeys.add(String(row.source_post_id));
+    }
+  }
   for (const entry of page.eligible) {
     const n = normalizeApifyItem(entry.item);
+    if(knownKeys.size&&((entry.identity.key&&knownKeys.has(entry.identity.key))||(entry.identity.legacyIds||[]).some((id:string)=>knownKeys.has(id)))){counts.duplicates++;continue;}
     // Dedupe under every identity format this post may have been saved with; the DB unique index is the final guard.
     const clause=D.dedupeOrClause(entry.identity);
     if(clause){const found=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id&limit=1`);if(found.length){counts.duplicates++;continue;}}
