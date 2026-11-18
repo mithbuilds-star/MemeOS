@@ -737,7 +737,9 @@ async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode
       try{
         return await runApifyPoll(env,ctx,job[0],items);
       }catch(error:any){
-        await db(env,"jobs",`?id=eq.${job[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,200)}`})}).catch(()=>{});
+        const reason=`Import failed: ${String(error?.message||error).slice(0,300)}`;
+        console.error("Simple import failed", job[0].id, reason);
+        await db(env,"jobs",`?id=eq.${job[0].id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:reason})}).catch((patchError:any)=>console.error("Could not record import failure", String(patchError?.message||patchError)));
         throw error;
       }
     }catch(e:any){lastError=e?.message||lastError;}
