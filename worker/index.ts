@@ -235,7 +235,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     // A profile page capped at 25 posts should never occupy a Worker job forever.
     // Check the actual Apify state first so a completed-but-unpolled run is still imported.
     const isBackfill=job.metadata?.phase==="backfill";
-    const maxAgeMs=isBackfill?20*60*1000:12*60*1000;
+    const maxAgeMs=isBackfill?20*60*1000:(job.metadata?.phase==="dating"?90*60*1000:12*60*1000);
     const ageMs=job.created_at?Date.now()-Date.parse(job.created_at):0;
     if(Number.isFinite(ageMs)&&ageMs>maxAgeMs){
       const reason=`Apify ${isBackfill?"historical backfill":"incremental discovery"} exceeded its ${Math.round(maxAgeMs/60000)} minute limit; the run was aborted to prevent a stuck job and further usage.`;
@@ -256,22 +256,30 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`,job);
   const items:any[]=await itemsRes.json();
   if(job.metadata?.phase==="dating"){
-    // Dating runs never insert posts or move cursors. They only fill in missing publish dates.
-    let matched=0,updated=0;
+    // Resumable: each attempt patches at most DATING_PATCH_LIMIT rows, then reschedules itself.
+    // Dating never inserts posts or moves cursors; it only fills source_posted_at on existing rows.
+    const undated:any[]=await db(env,"memes",`?${userFilter(ctx)}&source_type=eq.discovery&source_posted_at=is.null&select=id,source_post_id,source_permalink&limit=1000`);
+    const byKey=new Map<string,string>();
+    for(const row of undated){
+      const keyed=D.discoveryIdentity({url:row.source_permalink,id:row.source_post_id});
+      if(keyed.key)byKey.set(keyed.key,row.id);
+      if(row.source_post_id)byKey.set(String(row.source_post_id),row.id);
+    }
+    const DATING_PATCH_LIMIT=40;
+    let matched=0,updated=0,more=false;
+    const patched=new Set<string>();
     for(const item of items){
       const n=normalizeApifyItem(item);
+      if(!n.postedAt)continue;
       const identity=D.discoveryIdentity(item);
-      const clause=D.dedupeOrClause(identity);
-      if(!clause||!n.postedAt)continue;
-      const rows:any[]=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id,source_posted_at`);
-      for(const row of rows){
-        matched++;
-        if(!row.source_posted_at){
-          await db(env,"memes",`?id=eq.${row.id}&${userFilter(ctx)}&source_posted_at=is.null`,{method:"PATCH",body:JSON.stringify({source_posted_at:n.postedAt})});
-          updated++;
-        }
-      }
+      const rowId=(identity.key&&byKey.get(identity.key))||identity.legacyIds.map((id:string)=>byKey.get(id)).find(Boolean);
+      if(!rowId||patched.has(rowId))continue;
+      if(updated>=DATING_PATCH_LIMIT){more=true;break;}
+      matched++;
+      await db(env,"memes",`?id=eq.${rowId}&${userFilter(ctx)}&source_posted_at=is.null`,{method:"PATCH",body:JSON.stringify({source_posted_at:n.postedAt})});
+      patched.add(rowId);updated++;
     }
+    if(more)return {done:false,status:"dating",dated_updated:updated};
     if(job.metadata?.source_reference_account_id)await db(env,"reference_accounts",`?id=eq.${job.metadata.source_reference_account_id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({legacy_dated_at:new Date().toISOString()})});
     await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,dated_matched:matched,dated_updated:updated}})});
     return {done:true,status:"SUCCEEDED",items_seen:items.length,dated_matched:matched,dated_updated:updated};
