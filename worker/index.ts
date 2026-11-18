@@ -231,11 +231,12 @@ async function chainNextDiscovery(env:Env,ctx:Ctx,source:any,phase:"incremental"
   catch(error:any){console.error("Chained discovery start failed",source.username,String(error?.message||error));}
 }
 
-async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
+async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   const runId=job.provider_run_id;
-  if(!runId)throw new Error("Discovery job has no Apify run ID.");
-  const statusRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
-  const statusData:any=await statusRes.json().catch(()=>({}));
+  if(!runId&&!preItems)throw new Error("Discovery job has no Apify run ID.");
+  // Sync runs already hold their posts, so there is no status check to make.
+  const statusRes=preItems?null:await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
+  const statusData:any=statusRes?await statusRes.json().catch(()=>({})):{data:{status:"SUCCEEDED",defaultDatasetId:null}};
   const run=statusData.data||{};
   // Resolve the phase before either the timeout or dataset-import path uses it.
   const isBackfill=job.metadata?.phase==="backfill";
@@ -258,12 +259,12 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",last_error:`Apify run finished with status ${run.status}.`,completed_at:new Date().toISOString(),next_retry_at:null,locked_until:null})});
     throw new Error(`Apify run finished with status ${run.status}.`);
   }
-  const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
+  const datasetId=run.defaultDatasetId||job.metadata?.dataset_id||(preItems?"sync":null);
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
   // One page per run, inside the window stored on this job.
   const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:(job.metadata?.deep_limit||(job.metadata?.phase==="backfill"?BACKFILL_RUN_LIMIT:SCRAPE_BATCH));
-  const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${itemsLimit}`,job);
-  const items:any[]=await itemsRes.json();
+  const itemsRes=preItems?null:await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${itemsLimit}`,job);
+  const items:any[]=preItems||await itemsRes!.json();
   if(job.metadata?.phase==="dating"){
     // Resumable: each attempt patches at most DATING_PATCH_LIMIT rows, then reschedules itself.
     // Dating never inserts posts or moves cursors; it only fills source_posted_at on existing rows.
@@ -319,7 +320,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     // Dedupe under every identity format this post may have been saved with; the DB unique index is the final guard.
     const clause=D.dedupeOrClause(entry.identity);
     if(clause){const found=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id&limit=1`);if(found.length){counts.duplicates++;continue;}}
-    if(counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;break;}
+    if(!preItems&&counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;break;}
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
       try {
@@ -726,8 +727,10 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       const input=buildActorInput(credential.actor_input,[source.username],actorId,runLimit,windowNewer,windowOlder);
       // Hard-cap runtime and billable results. Historical filtering may page past newer posts.
       const runTimeoutSeconds=phase==="backfill"?900:600;
-      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=${runTimeoutSeconds}&maxItems=${runLimit}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
+      // One call: start the run and receive its posts in the same response (Apify holds the request until the run finishes).
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=${Math.min(runTimeoutSeconds,290)}&maxItems=${runLimit}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
       const result:any=await response.json().catch(()=>({}));
+      const syncItems:any[]=Array.isArray(result)?result:[];
       if(!response.ok){
         lastError=result.error?.message||`Apify returned ${response.status}.`;
         const balanceError=isApifyMonthlyLimitError(lastError);
@@ -738,9 +741,10 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase:runPhase,backfill_before:runPhase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null,deep_limit:isNewestRun&&deepLimit?deepLimit:null}})});
-      if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
-      return job[0];
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase:runPhase,backfill_before:runPhase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null,deep_limit:isNewestRun&&deepLimit?deepLimit:null}})});
+      if(!job?.[0]?.id)throw new Error("Apify finished, but MemeOS could not save the discovery job.");
+      // Import the posts that came back in this same response.
+      return await runApifyPoll(env,ctx,job[0],syncItems);
     }catch(e:any){lastError=e?.message||lastError;}
   }
   throw new Error(`@${source.username}: ${lastError}`);
