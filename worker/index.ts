@@ -196,6 +196,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const statusRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,job);
   const statusData:any=await statusRes.json().catch(()=>({}));
   const run=statusData.data||{};
+  // Resolve the phase before either the timeout or dataset-import path uses it.
+  const isBackfill=job.metadata?.phase==="backfill";
   if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status)){
     // A profile page capped at 25 posts should never occupy a Worker job forever.
     // Check the actual Apify state first so a completed-but-unpolled run is still imported.
@@ -224,7 +226,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // The official Apify actor has no onlyPostsOlderThan input, so enforce the
   // cutoff locally after fetching its maximum timeline; compatible custom actors
   // can also apply the same cutoff server-side.
-  const isBackfill=job.metadata?.phase==="backfill";
   const backfillBefore=isBackfill&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
   // Apply the exact saved timestamp locally as a second guard. Coregent accepts
   // ISO date-times for both newer-than and older-than filters; truncating the
