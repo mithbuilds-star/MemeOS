@@ -268,8 +268,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     } catch (error:any) { counts.insertErrors++; console.error("Discovery meme insert failed",entry.identity.key,String(error?.message||error)); }
     if(createdId){try{await assignDiscoveredMeme(env,ctx,createdId,src[0]?.id||null);}catch(error:any){console.error("Discovery assignment failed",createdId,String(error?.message||error));}}
   }
-
-  }
   const sourceId=job.metadata?.source_reference_account_id;
   const sourceRows=sourceId?await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,discovery_sweep_top`):[];
   const source:any=sourceRows?.[0]||null;
@@ -294,8 +292,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     else if(phase==="incremental"&&next.backfill_complete!==true&&next.backfill_before)await chainNextDiscovery(env,ctx,next,"backfill");
   }
   await refreshAllCredentialUsage(env,ctx);
-  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${page.seen}, imported ${counts.inserted}, duplicates ${counts.duplicates}, out of window ${page.outOfWindow}, invalid IDs ${page.invalid}, insert errors ${counts.insertErrors}, media unavailable ${counts.failedMedia}.`,counts.inserted,summary);  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${items.length}, imported ${inserted}, duplicates ${duplicates}, invalid IDs ${invalidIds}, insert errors ${insertErrors}, media unavailable ${failedMedia}.`,inserted,{items_seen:items.length,items_eligible:batch.length,inserted,skipped,duplicates,invalid_ids:invalidIds,insert_errors:insertErrors,failed_media:failedMedia,source_usernames:sourceNames,phase:isBackfill?"backfill":"incremental"});
-  return {done:true,status:"SUCCEEDED",items_seen:items.length,items_eligible:batch.length,inserted,skipped,failed_media:failedMedia};
+  await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${page.seen}, imported ${counts.inserted}, duplicates ${counts.duplicates}, out of window ${page.outOfWindow}, invalid IDs ${page.invalid}, insert errors ${counts.insertErrors}, media unavailable ${counts.failedMedia}.`,counts.inserted,summary);
+  return {done:true,status:"SUCCEEDED",items_seen:page.seen,items_eligible:counts.inserted+counts.duplicates+counts.insertErrors,inserted:counts.inserted,skipped:summary.skipped,failed_media:counts.failedMedia};
 }
 
 
