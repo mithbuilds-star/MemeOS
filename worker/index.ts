@@ -383,7 +383,20 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
       const newestPosted=page.newestInWindowMs==null?null:new Date(page.newestInWindowMs).toISOString();
       const oldestPosted=page.oldestInWindowMs==null?null:new Date(page.oldestInWindowMs).toISOString();
       if(newestPosted){
-        simplePointerPatch={last_scraped_at:newestPosted,...(!source.backfill_before&&oldestPosted?{backfill_before:oldestPosted}:{}),last_scrape_status:"completed"};
+        // A source with no incremental cursor is being baselined, even if an old/partial
+        // history attempt left a stale backfill_before value behind. Anchor history to
+        // the oldest post in THIS newest page, otherwise the gap between that page and
+        // the stale pointer is permanently skipped and backfill_complete may block paging.
+        const establishingBaseline=!source.last_scraped_at;
+        simplePointerPatch={
+          last_scraped_at:newestPosted,
+          ...(oldestPosted&&(establishingBaseline||!source.backfill_before)?{backfill_before:oldestPosted}:{}),
+          ...(establishingBaseline?{
+            backfill_complete:items.length<SIMPLE_PAGE,
+            backfill_stop_reason:null,
+          }:{}),
+          last_scrape_status:"completed"
+        };
       }
     }
   }
