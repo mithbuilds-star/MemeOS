@@ -428,8 +428,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
     const nextSource={...source,...(simplePointerPatch||{})};
     const mode=job.metadata?.mode;
     const shouldContinue=mode==="newest"
-      ? counts.inserted<5&&!!nextSource.backfill_before&&nextSource.backfill_complete!==true
-      : mode==="history"&&simplePointerPatch?.backfill_complete!==true&&simplePointerPatch?.last_scrape_status!=="error"&&!!nextSource.backfill_before;
+      ? counts.inserted<5&&!!nextSource.backfill_before&&nextSource.backfill_complete!==true&&!nextSource.backfill_stop_reason
+      : mode==="history"&&simplePointerPatch?.backfill_complete!==true&&simplePointerPatch?.last_scrape_status!=="error"&&!simplePointerPatch?.backfill_stop_reason&&!!nextSource.backfill_before;
     if(shouldContinue){
       const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
       if(credentials.length)await startSimplePage(env,ctx,nextSource,credentials,"history",nextSource.backfill_before);
