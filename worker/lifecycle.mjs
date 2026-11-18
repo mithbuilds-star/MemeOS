@@ -6,7 +6,8 @@
 // written on claim; every later write must match it (compare-and-set).
 
 export const DEFAULTS = {
-  maxAttempts: 5, // discard after this many consecutive errors\n  sameErrorLimit: 3, // discard sooner when the exact same error repeats
+  maxAttempts: 5, // discard after this many consecutive errors
+  sameErrorLimit: 3, // discard sooner when the exact same error repeats
   attemptTimeoutMs: 120_000,       // per-attempt OCR/classify timeout
   renderWatchdogMs: 30 * 60_000,   // how long a dispatched GitHub render may run
   backoffBaseMs: 60_000,           // retry_wait backoff: base * 2^(attempt-1), capped
