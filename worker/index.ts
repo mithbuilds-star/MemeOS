@@ -196,7 +196,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // One-off pull of the newest posts for an account, used only to write publish dates onto existing rows.
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
-// Incremental and re-anchor runs fetch the newest 100 posts per account.
+// Deep incremental run: the newest 100 posts per account, used when the newest 25 had fewer than 5 new posts.
 const INCREMENTAL_RUN_LIMIT=100;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
   let lastError="No Apify key could start the dating run.";
@@ -257,7 +257,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
   // One page per run, inside the window stored on this job.
-  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:(job.metadata?.phase==="incremental"||job.metadata?.phase==="reanchor")?INCREMENTAL_RUN_LIMIT:SCRAPE_BATCH;
+  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:(job.metadata?.deep_limit||SCRAPE_BATCH);
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${itemsLimit}`,job);
   const items:any[]=await itemsRes.json();
   if(job.metadata?.phase==="dating"){
@@ -348,6 +348,13 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     else if(phase==="incremental"&&next.discovery_upper_bound)await chainNextDiscovery(env,ctx,next,"incremental");
     else if(phase==="backfill"&&plan.complete===false)await chainNextDiscovery(env,ctx,next,"backfill");
     else if(phase==="incremental"&&next.backfill_complete!==true&&next.backfill_before)await chainNextDiscovery(env,ctx,next,"backfill");
+  }
+  // Fewer than 5 new posts in the newest 25: look deeper once, at the newest 100 (dedupe keeps only new ones).
+  if(phase==="incremental"&&counts.inserted<5&&!job.metadata?.deep_limit&&source&&!(await hasActiveDiscoveryForSource(env,ctx,source.id))){
+    try{
+      const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+      if(creds.length)await startApifyDiscoveryForSource(env,ctx,source,creds,false,"incremental",null,INCREMENTAL_RUN_LIMIT);
+    }catch(error:any){console.error("Deep incremental start failed",source.username,String(error?.message||error));}
   }
   await refreshAllCredentialUsage(env,ctx);
   await logMajorActivity(env,ctx.userId,"discovery_batch",`Discovery fetched ${page.seen}, imported ${counts.inserted}, duplicates ${counts.duplicates}, out of window ${page.outOfWindow}, invalid IDs ${page.invalid}, insert errors ${counts.insertErrors}, media unavailable ${counts.failedMedia}.`,counts.inserted,summary);
@@ -658,7 +665,7 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
   const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
   return active.length>0;
 }
-async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null){
+async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null){
   let lastError="No Apify key could start the run.";
   for(const credential of credentials){
     if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
@@ -675,9 +682,10 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       // backfill = (-inf, backfill_before). Windows are stored on the job so polling uses the same one.
       // Accounts never re-anchored get a one-time "reanchor" scan first (see discovery.mjs).
       const runPhase=phase==="incremental"&&!source.reanchored_at?"reanchor":phase;
-      // The actor ignores date windows on incremental runs, so fetch the newest 100 posts and let dedupe keep only new ones.
+      // The actor ignores date windows on incremental runs, so take the newest posts and let dedupe keep only new ones.
+      // First incremental run: newest 25. If fewer than 5 are new, a deep run takes the newest 100 (see poll).
       const isNewestRun=runPhase==="incremental";
-      const runLimit=isNewestRun?INCREMENTAL_RUN_LIMIT:SCRAPE_BATCH;
+      const runLimit=isNewestRun&&deepLimit?deepLimit:SCRAPE_BATCH;
       const windowNewer=null;
       const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(isNewestRun?null:(source.discovery_upper_bound||null));
       const input=buildActorInput(credential.actor_input,[source.username],actorId,runLimit,windowNewer,windowOlder);
@@ -695,7 +703,7 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
         continue;
       }
       await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase:runPhase,backfill_before:runPhase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null}})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:5,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled,phase:runPhase,backfill_before:runPhase==="backfill"?(backfillBefore||source.backfill_before||null):null,window_newer_than:windowNewer,window_older_than:windowOlder,last_successful_scrape_at:source.last_scraped_at||null,deep_limit:isNewestRun&&deepLimit?deepLimit:null}})});
       if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the discovery job.");
       return job[0];
     }catch(e:any){lastError=e?.message||lastError;}
