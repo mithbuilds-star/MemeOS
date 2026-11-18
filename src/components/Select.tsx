@@ -4,7 +4,7 @@ import { Check, ChevronDown, Search } from "lucide-react";
 
 export type SelectOption = { value: string; label: string };
 
-type MenuPos = { top: number; left: number; width: number; up: boolean };
+type MenuPos = { top: number; left: number; width: number; up: boolean; maxHeight: number };
 
 export function Select({ value, onChange, options, placeholder = "Select", disabled = false, defaultValue, defaultLabel, searchable = true }: {
   value: string;
@@ -49,12 +49,13 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
     const place = () => {
       const r = trigger.current?.getBoundingClientRect();
       if (!r) return;
-      const wanted = Math.min(menu.current?.offsetHeight || 320, 360);
-      const below = window.innerHeight - r.bottom - 8;
-      const above = r.top - 8;
-      const up = below < wanted && above > below;
-      setPos({ top: up ? r.top - 6 : r.bottom + 6, left: r.left, width: r.width, up });
+      // Always open below the button. Cap the height to the room that is left and let the list scroll.
+      const room = window.innerHeight - r.bottom - 14;
+      const maxHeight = Math.max(200, Math.min(360, room));
+      setPos({ top: r.bottom + 6, left: r.left, width: r.width, up: false, maxHeight });
     };
+    // Bring the button into view first, so the menu has room below it.
+    trigger.current?.scrollIntoView({ block: "nearest" });
     place();
     window.addEventListener("scroll", place, true);
     window.addEventListener("resize", place);
@@ -103,8 +104,8 @@ export function Select({ value, onChange, options, placeholder = "Select", disab
         left: pos.left,
         width: pos.width,
         right: "auto",
-        top: pos.up ? "auto" : pos.top,
-        bottom: pos.up ? window.innerHeight - pos.top : "auto",
+        top: pos.top,
+        maxHeight: pos.maxHeight,
       }
     : { visibility: "hidden", position: "fixed", top: 0, left: 0 };
 
