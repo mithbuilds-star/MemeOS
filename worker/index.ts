@@ -224,7 +224,8 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // The official Apify actor has no onlyPostsOlderThan input, so enforce the
   // cutoff locally after fetching its maximum timeline; compatible custom actors
   // can also apply the same cutoff server-side.
-  const backfillBefore=job.metadata?.phase==="backfill"&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
+  const isBackfill=job.metadata?.phase==="backfill";
+  const backfillBefore=isBackfill&&job.metadata?.backfill_before?Date.parse(job.metadata.backfill_before):null;
   // Apply the exact saved timestamp locally as a second guard. Coregent accepts
   // ISO date-times for both newer-than and older-than filters; truncating the
   // incremental cursor to a calendar day caused the same day's posts to be
@@ -269,7 +270,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
     try { const created=await db(env,"memes","",{method:"POST",body:JSON.stringify(payload)}); inserted++; if(created?.[0]?.id)await assignDiscoveredMeme(env,ctx,created[0].id,src[0]?.id||null); } catch (error:any) { skipped++; insertErrors++; console.error("Discovery meme insert failed",n.postId,String(error?.message||error)); }
   }
   const sourceNames=Array.isArray(job.metadata?.source_usernames)?job.metadata.source_usernames:[];
-  const isBackfill=job.metadata?.phase==="backfill";
   const sourceId=job.metadata?.source_reference_account_id;
   let source:any=null;
   if(sourceId){
