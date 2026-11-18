@@ -196,6 +196,8 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // One-off pull of the newest posts for an account, used only to write publish dates onto existing rows.
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
+// Incremental and re-anchor runs fetch the newest 100 posts per account.
+const INCREMENTAL_RUN_LIMIT=100;
 async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
   let lastError="No Apify key could start the dating run.";
   for(const credential of credentials){
@@ -255,7 +257,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   const datasetId=run.defaultDatasetId||job.metadata?.dataset_id;
   if(!datasetId)throw new Error("Apify run completed without a dataset ID.");
   // One page per run, inside the window stored on this job.
-  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:SCRAPE_BATCH;
+  const itemsLimit=job.metadata?.phase==="dating"?DATING_RUN_LIMIT:(job.metadata?.phase==="incremental"||job.metadata?.phase==="reanchor")?INCREMENTAL_RUN_LIMIT:SCRAPE_BATCH;
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${itemsLimit}`,job);
   const items:any[]=await itemsRes.json();
   if(job.metadata?.phase==="dating"){
@@ -673,12 +675,15 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
       // backfill = (-inf, backfill_before). Windows are stored on the job so polling uses the same one.
       // Accounts never re-anchored get a one-time "reanchor" scan first (see discovery.mjs).
       const runPhase=phase==="incremental"&&!source.reanchored_at?"reanchor":phase;
-      const windowNewer=runPhase==="incremental"?(source.last_scraped_at||null):null;
-      const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(source.discovery_upper_bound||null);
-      const input=buildActorInput(credential.actor_input,[source.username],actorId,SCRAPE_BATCH,windowNewer,windowOlder);
+      // The actor ignores date windows on incremental runs, so fetch the newest 100 posts and let dedupe keep only new ones.
+      const isNewestRun=runPhase==="incremental";
+      const runLimit=isNewestRun?INCREMENTAL_RUN_LIMIT:SCRAPE_BATCH;
+      const windowNewer=null;
+      const windowOlder=runPhase==="backfill"?(backfillBefore||source.backfill_before||null):(isNewestRun?null:(source.discovery_upper_bound||null));
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,runLimit,windowNewer,windowOlder);
       // Hard-cap runtime and billable results. Historical filtering may page past newer posts.
       const runTimeoutSeconds=phase==="backfill"?900:600;
-      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=${runTimeoutSeconds}&maxItems=${SCRAPE_BATCH}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=${runTimeoutSeconds}&maxItems=${runLimit}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
       const result:any=await response.json().catch(()=>({}));
       if(!response.ok){
         lastError=result.error?.message||`Apify returned ${response.status}.`;
