@@ -243,7 +243,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   const statusData:any=statusRes?await statusRes.json().catch(()=>({})):{data:{status:"SUCCEEDED",defaultDatasetId:null}};
   const run=statusData.data||{};
   // Resolve the phase before either the timeout or dataset-import path uses it.
-  const isBackfill=job.metadata?.phase==="backfill";
+  const isBackfill=job.metadata?.phase==="backfill"||(job.metadata?.phase==="simple"&&job.metadata?.mode==="history");
   if(!["SUCCEEDED","FAILED","ABORTED","TIMED-OUT"].includes(run.status)){
     // A profile page capped at 25 posts should never occupy a Worker job forever.
     // Check the actual Apify state first so a completed-but-unpolled run is still imported.
