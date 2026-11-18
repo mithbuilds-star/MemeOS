@@ -76,8 +76,9 @@ function runBackfill(source, store, posts, tally = { inserted: 0, duplicates: 0,
     const window = { newerThan: null, olderThan: Date.parse(source.backfill_before) };
     const page = D.classifyPage(actor(posts, window), window, { parseTs });
     if (page.oldestInWindowMs != null) oldestSeen.push(page.oldestInWindowMs);
+    const insertedBefore = tally.inserted;
     applyPage(store, page, tally);
-    const plan = D.planAdvance("backfill", source, pageSummary(page, 0), BASE);
+    const plan = D.planAdvance("backfill", source, { ...pageSummary(page, 0), inserted: tally.inserted - insertedBefore }, BASE);
     assert.equal(plan.ok, true, plan.error);
     applyPatch(source, plan.patch);
     if (plan.complete) return { tally, oldestSeen };
@@ -237,4 +238,13 @@ test("identity: shortcode wins over unstable numeric IDs and matches legacy rows
   assert.match(clause, /source_post_id\.eq\.Dfx2j7FiWbn/);
   assert.match(clause, /source_permalink\.like\.\*\/Dfx2j7FiWbn\/\*/);
   assert.equal(D.dedupeOrClause({ key: null, legacyIds: [], shortcode: null }), null);
+});
+
+test("13. a full backfill page with no new posts stops instead of re-walking imported history", () => {
+  const source = { backfill_before: at(0), backfill_pages: 0 };
+  const plan = D.planAdvance("backfill", source, { rawCount: 25, inWindowCount: 25, oldestInWindowMs: BASE - 60e3, newestInWindowMs: BASE - 1000, insertErrors: 0, inserted: 0 }, BASE);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.complete, true);
+  assert.equal(plan.patch.backfill_complete, true);
+  assert.match(plan.patch.backfill_stop_reason, /already imported/);
 });

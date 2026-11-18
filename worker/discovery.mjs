@@ -139,6 +139,11 @@ export function planAdvance(phase, source, page, jobCreatedMs) {
       };
     }
     if (page.oldestInWindowMs == null) return { ok: false, error: "The historical page has no usable timestamps, so pagination is unsafe." };
+    // A full page with nothing new means this pointer is behind the history already imported.
+    // Walking further would only re-fetch duplicates, so stop and say why.
+    if ((page.inserted ?? 0) === 0) {
+      return { ok: true, complete: true, patch: { backfill_complete: true, backfill_stop_reason: "Stopped: a full historical page contained only posts already imported. The history pointer was behind the imported posts.", last_scrape_status: "completed" } };
+    }
     const pages = (source.backfill_pages || 0) + 1;
     const next = page.oldestInWindowMs + OVERLAP_MS;
     if (before != null && next >= before) {

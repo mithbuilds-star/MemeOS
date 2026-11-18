@@ -259,7 +259,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
       } catch { counts.failedMedia++; }
     }
     const src = await db(env,"reference_accounts",`?${userFilter(ctx)}&username=eq.${encodeURIComponent((n.username||"").replace(/^@/,""))}&select=id`);
-    const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:entry.identity.key,source_permalink:entry.identity.permalink||n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl};
+    const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:entry.identity.key,source_permalink:entry.identity.permalink||n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl,source_posted_at:entry.ts?new Date(entry.ts).toISOString():null};
     let createdId:string|null=null;
     try {
       // ignore-duplicates: a row that already exists returns [] instead of failing, so concurrent runs cannot double insert.
@@ -275,7 +275,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // Cursor movement lives only in planAdvance: it never moves on partial insert failure or an ignored window.
   let plan:any=null;
   if(source){
-    plan=D.planAdvance(phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors},jobCreatedMs);
+    plan=D.planAdvance(phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors,inserted:counts.inserted},jobCreatedMs);
     if(plan.ok) await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(plan.patch)});
     else {
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scrape_status:"error"})});
