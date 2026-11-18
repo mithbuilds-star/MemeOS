@@ -193,6 +193,28 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
   return response;
 }
 
+// One-off pull of the newest posts for an account, used only to write publish dates onto existing rows.
+async function startDatingRun(env:Env,ctx:Ctx,source:any,credentials:any[]){
+  let lastError="No Apify key could start the dating run.";
+  for(const credential of credentials){
+    if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
+    try{
+      const secret=await decryptSecret(env,credential);
+      const actorId=DEFAULT_APIFY_ACTOR;
+      const actor=encodeURIComponent(actorId.replace("/","~"));
+      const input=buildActorInput(credential.actor_input,[source.username],actorId,100,null,null);
+      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&timeout=600&maxItems=100`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
+      const result:any=await response.json().catch(()=>({}));
+      if(!response.ok){lastError=result.error?.message||`Apify returned ${response.status}.`;continue;}
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
+      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:result.data?.id,attempt_count:0,max_attempts:3,metadata:{dataset_id:result.data?.defaultDatasetId,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"dating"}})});
+      if(!job?.[0]?.id)throw new Error("Apify started, but MemeOS could not save the dating job.");
+      return job[0];
+    }catch(e:any){lastError=e?.message||lastError;}
+  }
+  throw new Error(`@${source.username}: ${lastError}`);
+}
+
 async function chainNextDiscovery(env:Env,ctx:Ctx,source:any,phase:"incremental"|"backfill"|"reanchor"){
   if(await hasActiveDiscoveryForSource(env,ctx,source.id))return;
   const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
@@ -233,6 +255,27 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any) {
   // One page per run, inside the window stored on this job.
   const itemsRes=await apifyRequestForDiscoveryJob(env,ctx,`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json&limit=${SCRAPE_BATCH}`,job);
   const items:any[]=await itemsRes.json();
+  if(job.metadata?.phase==="dating"){
+    // Dating runs never insert posts or move cursors. They only fill in missing publish dates.
+    let matched=0,updated=0;
+    for(const item of items){
+      const n=normalizeApifyItem(item);
+      const identity=D.discoveryIdentity(item);
+      const clause=D.dedupeOrClause(identity);
+      if(!clause||!n.postedAt)continue;
+      const rows:any[]=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id,source_posted_at`);
+      for(const row of rows){
+        matched++;
+        if(!row.source_posted_at){
+          await db(env,"memes",`?id=eq.${row.id}&${userFilter(ctx)}&source_posted_at=is.null`,{method:"PATCH",body:JSON.stringify({source_posted_at:n.postedAt})});
+          updated++;
+        }
+      }
+    }
+    if(job.metadata?.source_reference_account_id)await db(env,"reference_accounts",`?id=eq.${job.metadata.source_reference_account_id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({legacy_dated_at:new Date().toISOString()})});
+    await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,metadata:{...job.metadata,dataset_id:datasetId,items_seen:items.length,dated_matched:matched,dated_updated:updated}})});
+    return {done:true,status:"SUCCEEDED",items_seen:items.length,dated_matched:matched,dated_updated:updated};
+  }
   const phase=isBackfill?"backfill":(job.metadata?.phase==="reanchor"?"reanchor":"incremental");
   const window={newerThan:job.metadata?.window_newer_than?Date.parse(job.metadata.window_newer_than):null,olderThan:job.metadata?.window_older_than?Date.parse(job.metadata.window_older_than):null};
   const page=D.classifyPage(items,window,{parseTs:(item:any)=>{const value=normalizeApifyItem(item).postedAt;return value?Date.parse(value):null;}});
@@ -791,7 +834,7 @@ async function runScheduledDiscovery(env:Env){
     const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&discovery_enabled=eq.true&select=id`);if(!accounts.length)continue;
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let all=false;for(const a of accounts){const own=mappings.filter((m:any)=>m.destination_account_id===a.id);if(!own.length)all=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,reanchored_at`);
+    const sources=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,reanchored_at,legacy_dated_at`);
     const selected=all?sources:sources.filter((s:any)=>allowed.has(s.id));if(!selected.length)continue;
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);if(!creds.length)continue;
     const lockUntil=new Date(Date.now()+10*60*1000).toISOString();
@@ -800,6 +843,7 @@ async function runScheduledDiscovery(env:Env){
     for(const source of selected){
       try{
         if(await hasActiveDiscoveryForSource(env,ctx,source.id))continue;
+        if(!source.legacy_dated_at){await startDatingRun(env,ctx,source,creds);startedCount++;continue;}
         await startApifyDiscoveryForSource(env,ctx,source,creds,true);startedCount++;
       }catch(e:any){console.error("Scheduled discovery start failed",source.username,String(e?.message||e));}
     }
@@ -1537,7 +1581,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!activeAccounts.length)return fail("Enable discovery on at least one destination account first.");
     const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
     const allowed=new Set<string>();let allSources=false;for(const account of activeAccounts){const own=mappings.filter((m:any)=>m.destination_account_id===account.id);if(!own.length)allSources=true;for(const m of own)allowed.add(m.reference_account_id);}
-    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,reanchored_at`);
+    const allSourcesRows=await db(env,"reference_accounts",`?${userFilter(ctx)}&enabled=eq.true&select=id,username,scraped_offset,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,reanchored_at,legacy_dated_at`);
     const sources=allSources?allSourcesRows:allSourcesRows.filter((source:any)=>allowed.has(source.id));
     if(!sources.length)return fail("Add or assign at least one enabled reference account to a destination with discovery enabled.");
     const jobs:any[]=[];const errors:string[]=[];
