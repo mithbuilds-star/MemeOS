@@ -103,16 +103,16 @@ async function readBoundedBody(response:Response,maxBytes:number){
 function normalizeApifyItem(item: any) {
   // Coregent returns nested owner/media objects and separates generic row type
   // ("post") from the actual Instagram media type ("IMAGE", "REEL", etc.).
-  const rawUsername = firstString(item,["owner.username","ownerUsername","username","author.username","user.username","input"]);
+  const rawUsername = firstString(item,["owner.username","ownerUsername","username","author.username","user.username","scraped_username","input"]);
   const username = rawUsername?rawUsername.replace(/^@/,"").toLowerCase():null;
   // Canonical Instagram shortcode identity (see worker/discovery.mjs).
   const identity = D.discoveryIdentity(item);
   const permalink = identity.permalink;
   const postId = identity.key;
   const image = firstString(item,["media.displayUrl","media.thumbnailUrl","displayUrl","display_url","imageUrl","image_url","thumbnailUrl","images.0.url","media.0.media_url","media.0.cover_url"]);
-  const caption = firstString(item,["caption","text","description","alt"]);
+  const caption = firstString(item,["caption","caption.text","text","description","alt"]);
   const type = firstString(item,["mediaType","productType","type"]) || "IMAGE";
-  const rawDate = item?.taken_at ?? item?.timestamp ?? item?.takenAt ??item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
+  const rawDate = item?.taken_at ?? item?.timestamp ??item?.takenAt ??item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
   let postedAt:string|null=null;
   if(typeof rawDate==="number"&&Number.isFinite(rawDate))postedAt=new Date(rawDate<1000000000000?rawDate*1000:rawDate).toISOString();
   else if(typeof rawDate==="string"&&rawDate.trim()){const parsed=new Date(rawDate);if(!Number.isNaN(parsed.getTime()))postedAt=parsed.toISOString();}
@@ -338,7 +338,9 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   for (const [entryIndex, entry] of page.eligible.entries()) {
     const n = normalizeApifyItem(entry.item);
     if(knownKeys.size&&((entry.identity.key&&knownKeys.has(entry.identity.key))||(entry.identity.legacyIds||[]).some((id:string)=>knownKeys.has(id)))){counts.duplicates++;continue;}
-    if(!preItems&&counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;processedIndex=entryIndex;break;}
+    // Every run imports at most MAX_IMPORTS_PER_POLL posts per invocation (Cloudflare subrequest cap).
+    // Posts are processed newest-first, so the next history run starts from the new oldest saved post.
+    if(counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;processedIndex=entryIndex;break;}
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
       try {
@@ -767,7 +769,7 @@ async function runWaitingReels(env:Env){
   }
 }
 
-const DEFAULT_APIFY_ACTOR = "intropix/instagram-posts-reels-scraper";
+const DEFAULT_APIFY_ACTOR = "sones/instagram-posts-scraper-lowcost";
 const SCRAPE_BATCH=25;
 
 async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
@@ -782,7 +784,7 @@ async function enqueueSourcePages(env:Env,ctx:Ctx,source:any,kind:"run"|"check")
   if(pending.length)return 0;
   const pages=kind==="check"
     ?[{mode:"check",label:"check newer posts"}]
-    :[{mode:"newest",label:"page 1 of 3"},{mode:"history",label:"page 2 of 3"},{mode:"history",label:"page 3 of 3"}];
+    :[{mode:"newest",label:"page 1 of 2"},{mode:"history",label:"page 2 of 2"}];
   let count=0;
   for(const page of pages){
     await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"pending",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,phase:"simple",mode:page.mode,kind,page_label:`${source.username} · ${page.label}`,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:false}})});
@@ -823,8 +825,10 @@ async function runNextPendingPage(env:Env){
   try{
     const secret=await decryptSecret(env,credential);
     const actor=encodeURIComponent(actorId.replace("/","~"));
-    const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,newerThan,olderThan);
-    const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${SIMPLE_PAGE}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
+    // History pages scan the newest 500 posts (the actor has no older-than filter); the Worker keeps only posts older than the oldest saved post.
+    const pageLimit=mode==="history"?500:SIMPLE_PAGE;
+    const input=buildActorInput(credential.actor_input,[source.username],actorId,pageLimit,newerThan,olderThan);
+    const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${pageLimit}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
     const body:any=await response.json().catch(()=>null);
     if(!response.ok)throw new Error(body?.error?.message||`Apify returned ${response.status}.`);
     items=Array.isArray(body)?body:[];
@@ -900,22 +904,16 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
 function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null,olderThan?:string|null){
   // intropix/instagram-posts-reels-scraper: maxPosts is the read budget; sinceDate/untilDate are UTC dates
   // (inclusive). Saved template keys from the old actor are discarded. Repeats are removed by dedupe.
+  // sones/instagram-posts-scraper-lowcost: postsPerProfile is the newest-first cap per account (max 500).
+  // newerThan takes an exact timestamp. It has no older-than filter, so history is filtered in the Worker.
   const input:any={
     usernames:usernames.map((u:string)=>u.replace(/^@/,"")),
-    maxPosts:Math.max(1,Math.min(100,limit)),
-    mediaType:"any",
-    includeViews:false,
-    includeOffGridReels:false,
+    postsPerProfile:Math.max(1,Math.min(500,limit)),
   };
-  const day=(value?:string|null)=>{
-    if(!value)return null;
-    const parsed=new Date(value);
-    return Number.isNaN(parsed.getTime())?null:parsed.toISOString().slice(0,10);
-  };
-  const since=day(newerThan);
-  const until=day(olderThan);
-  if(since)input.sinceDate=since;
-  if(until)input.untilDate=until;
+  if(newerThan){
+    const parsed=new Date(newerThan);
+    if(!Number.isNaN(parsed.getTime()))input.newerThan=parsed.toISOString();
+  }
   return input;
 }
 
