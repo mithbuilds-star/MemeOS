@@ -263,7 +263,7 @@ export function Scheduler() {
       if(!remaining)continue;
       const available=ranked[dayDate.getDay()].filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)}).sort();
       const count=Math.min(remaining,available.length);
-      const spread=count===1?[available[Math.floor((available.length-1)/2)]]:Array.from({length:count},(_,n)=>available[Math.round(n*(available.length-1)/Math.max(1,count-1))]);
+      const spread=count===1?[available[Math.floor((available.length-1)/2)]]:Array.from({length:count},(_,n)=>available[Math.round(n*(available.length-1)/Math.max(1,count-1))]));
       const candidates=spread.filter(Boolean);
       for(const time of candidates){slots.push(new Date(date+"T"+time+":00").toISOString());if(slots.length>=queueCount)break;}
     }
