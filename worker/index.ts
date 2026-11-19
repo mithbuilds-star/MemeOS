@@ -816,8 +816,9 @@ async function importQueueTick(env:Env,job:any){
   const queue:any[]=Array.isArray(job.metadata?.queue)?job.metadata.queue:[];
   const offset=Number(job.metadata?.queue_offset||0);
   const batch=queue.slice(offset,offset+QUEUE_BATCH);
+  let batchInserted=0;
   try{
-    if(batch.length)await runApifyPoll(env,ctx,{...job,metadata:{...job.metadata,queue_batch:true}},batch);
+    if(batch.length){const result:any=await runApifyPoll(env,ctx,{...job,metadata:{...job.metadata,queue_batch:true}},batch);batchInserted=Number(result?.inserted||0);}
   }catch(error:any){
     await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,200)}`})}).catch(()=>{});
     return;
@@ -825,7 +826,7 @@ async function importQueueTick(env:Env,job:any){
   const next=offset+batch.length;
   const done=next>=queue.length;
   await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({
-    metadata:{...job.metadata,queue:done?null:queue,queue_offset:next,queue_remaining:Math.max(0,queue.length-next)},
+    metadata:{...job.metadata,queue:done?null:queue,queue_offset:next,queue_remaining:Math.max(0,queue.length-next),inserted:Number(job.metadata?.inserted||0)+batchInserted},
     ...(done?{status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:null}:{}),
   })});
 }
