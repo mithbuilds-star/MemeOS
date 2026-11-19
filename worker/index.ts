@@ -197,7 +197,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
 // Max new posts imported per poll (each costs several Worker subrequests; Cloudflare caps them per invocation).
-const MAX_IMPORTS_PER_POLL=10;
+const MAX_IMPORTS_PER_POLL=6;
 // Historical (backfill) pages: 100 posts per page, so the actor's scan window reaches far enough back.
 const BACKFILL_RUN_LIMIT=100;
 // Deep incremental run: the newest 25 (already checked) plus the next 100. Posts already imported are skipped by dedupe.
