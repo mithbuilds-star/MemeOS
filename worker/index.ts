@@ -118,6 +118,24 @@ function normalizeApifyItem(item: any) {
   else if(typeof rawDate==="string"&&rawDate.trim()){const parsed=new Date(rawDate);if(!Number.isNaN(parsed.getTime()))postedAt=parsed.toISOString();}
   return { username, permalink, postId, image, caption, type, postedAt };
 }
+// Assigns many new discovered memes with a fixed number of requests: 3 lookups and one bulk insert.
+async function assignDiscoveredBatch(env:Env,ctx:Ctx,memeIds:string[],sourceId:string|null){
+  if(!memeIds.length)return;
+  const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,discovery_enabled`);
+  const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
+  const direct=new Set<string>();
+  for(const account of accounts){
+    if(!account.discovery_enabled)continue;
+    const own=mappings.filter((m:any)=>m.destination_account_id===account.id);
+    if(!own.length||own.some((m:any)=>m.reference_account_id===sourceId))direct.add(account.id);
+  }
+  const selected=new Set(direct);
+  const links=await db(env,"account_relationships",`?${userFilter(ctx)}&select=parent_account_id,child_account_id`);
+  let changed=true;while(changed){changed=false;for(const link of links){if(selected.has(link.parent_account_id)&&!selected.has(link.child_account_id)){selected.add(link.child_account_id);changed=true;}}}
+  const rows:any[]=[];
+  for(const memeId of memeIds)for(const destination of selected)rows.push({owner_id:ctx.userId,meme_id:memeId,destination_account_id:destination,assignment_source:direct.has(destination)?"discovery":"inheritance",approval_status:"pending",status:"pending"});
+  if(rows.length)await db(env,"account_meme_assignments","",{method:"POST",body:JSON.stringify(rows)});
+}
 async function assignDiscoveredMeme(env:Env,ctx:Ctx,memeId:string,sourceId:string|null){
   const accounts=await db(env,"instagram_accounts",`?${userFilter(ctx)}&select=id,discovery_enabled`);
   const mappings=await db(env,"destination_sources",`?${userFilter(ctx)}&select=destination_account_id,reference_account_id`);
@@ -197,7 +215,7 @@ async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,in
 // Dating reads each account's newest posts so older undated rows can be matched. 1000 covers the full legacy set.
 const DATING_RUN_LIMIT=1000;
 // Max new posts imported per poll (each costs several Worker subrequests; Cloudflare caps them per invocation).
-const MAX_IMPORTS_PER_POLL=6;
+const MAX_IMPORTS_PER_POLL=20;
 // Historical (backfill) pages: 100 posts per page, so the actor's scan window reaches far enough back.
 const BACKFILL_RUN_LIMIT=100;
 // Deep incremental run: the newest 25 (already checked) plus the next 100. Posts already imported are skipped by dedupe.
@@ -335,37 +353,26 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   // so a poll imports at most MAX_IMPORTS_PER_POLL posts and the rest are picked up by the next poll.
   let partial=false;
   let processedIndex=0;
+  const pending:any[]=[];
   for (const [entryIndex, entry] of page.eligible.entries()) {
     const n = normalizeApifyItem(entry.item);
     if(knownKeys.size&&((entry.identity.key&&knownKeys.has(entry.identity.key))||(entry.identity.legacyIds||[]).some((id:string)=>knownKeys.has(id)))){counts.duplicates++;continue;}
     // Every run imports at most MAX_IMPORTS_PER_POLL posts per invocation (Cloudflare subrequest cap).
     // Posts are processed newest-first, so the next history run starts from the new oldest saved post.
-    if(counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;processedIndex=entryIndex;break;}
-    let assetUrl:string|null=null, assetPath:string|null=null;
-    if (n.image) {
-      try {
-        const mediaUrl=new URL(n.image);
-        if(mediaUrl.protocol!=="https:"||["localhost","127.0.0.1","0.0.0.0","169.254.169.254"].includes(mediaUrl.hostname)||/^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\./.test(mediaUrl.hostname))throw new Error("Unsafe media URL rejected.");
-        const media = await fetch(mediaUrl.toString());
-        const ct = media.headers.get("content-type") || "image/jpeg";
-        const advertisedSize=Number(media.headers.get("content-length")||0);
-        const supportedImage=["image/jpeg","image/png","image/webp"].includes(ct.split(";")[0].trim().toLowerCase());
-        if (media.ok && supportedImage && (!advertisedSize||advertisedSize<=10*1024*1024)) {
-          const ext = ct.includes("png")?"png":ct.includes("webp")?"webp":"jpg";
-          assetPath = `${ctx.userId}/discovered/${crypto.randomUUID()}.${ext}`;
-          const mediaBytes=await readBoundedBody(media,10*1024*1024);assetUrl = await storageUpload(env,assetPath,mediaBytes.buffer as ArrayBuffer,ct);
-        }
-      } catch { counts.failedMedia++; }
-    }
-    const src=[{id:job.metadata?.source_reference_account_id||null}];
-    const payload:any = {owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:src[0]?.id||null,source_post_id:entry.identity.key,source_permalink:entry.identity.permalink||n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:assetUrl?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:assetPath,asset_url:assetUrl,source_asset_path:assetPath,source_asset_url:assetUrl,source_posted_at:entry.ts?new Date(entry.ts).toISOString():null};
-    let createdId:string|null=null;
-    try {
-      // ignore-duplicates: a row that already exists returns [] instead of failing, so concurrent runs cannot double insert.
-      const created=await db(env,"memes","?on_conflict=owner_id,source_post_id",{method:"POST",headers:{Prefer:"return=representation,resolution=ignore-duplicates"},body:JSON.stringify(payload)});
-      if(!created?.length){counts.duplicates++;} else {counts.inserted++; createdId=created[0].id||null;}
-    } catch (error:any) { counts.insertErrors++; console.error("Discovery meme insert failed",entry.identity.key,String(error?.message||error)); }
-    if(createdId){try{await assignDiscoveredMeme(env,ctx,createdId,src[0]?.id||null);}catch(error:any){console.error("Discovery assignment failed",createdId,String(error?.message||error));}}
+    if(pending.length>=MAX_IMPORTS_PER_POLL){partial=true;processedIndex=entryIndex;break;}
+    // Images are not copied into storage: the Instagram image URL is saved as-is (copying costs several requests per post).
+    const payload:any={owner_id:ctx.userId,source_type:"discovery",source_reference_account_id:job.metadata?.source_reference_account_id||null,source_post_id:entry.identity.key,source_permalink:entry.identity.permalink||n.permalink,source_username:n.username,original_caption:n.caption,extracted_text:null,classification:"needs_review",classification_reason:"Awaiting text extraction and review.",processing_status:n.image?"needs_ocr":"media_unavailable",original_post_type:n.type,asset_path:null,asset_url:n.image||null,source_asset_path:null,source_asset_url:n.image||null,source_posted_at:entry.ts?new Date(entry.ts).toISOString():null};
+    pending.push(payload);
+  }
+  // One bulk insert and one bulk assignment for the whole tick, instead of several requests per post.
+  if(pending.length){
+    let createdRows:any[]=[];
+    try{
+      const created=await db(env,"memes","?on_conflict=owner_id,source_post_id",{method:"POST",headers:{Prefer:"return=representation,resolution=ignore-duplicates"},body:JSON.stringify(pending)});
+      createdRows=Array.isArray(created)?created:[];
+      counts.inserted+=createdRows.length;counts.duplicates+=pending.length-createdRows.length;
+    }catch(error:any){counts.insertErrors+=pending.length;console.error("Discovery bulk insert failed",String(error?.message||error));}
+    if(createdRows.length){try{await assignDiscoveredBatch(env,ctx,createdRows.map((r:any)=>r.id),job.metadata?.source_reference_account_id||null);}catch(error:any){console.error("Discovery assignment failed",String(error?.message||error));}}
   }
   const sourceId=job.metadata?.source_reference_account_id;
   const sourceRows=sourceId?await db(env,"reference_accounts",`?id=eq.${encodeURIComponent(sourceId)}&${userFilter(ctx)}&select=id,username,last_scraped_at,backfill_before,backfill_complete,backfill_pages,discovery_upper_bound,discovery_sweep_top,reanchored_at,legacy_dated_at`):[];
@@ -803,7 +810,7 @@ async function postedBoundary(env:Env,ctx:Ctx,sourceId:string,direction:"asc"|"d
 // Runs the oldest pending page, one at a time across the whole account.
 // Imports the next QUEUE_BATCH posts of a queued run. Each scheduler tick is its own Worker invocation,
 // so every batch gets a fresh Cloudflare request budget.
-const QUEUE_BATCH=6;
+const QUEUE_BATCH=20;
 async function importQueueTick(env:Env,job:any){
   const ctx:Ctx={userId:job.owner_id,token:""};
   const queue:any[]=Array.isArray(job.metadata?.queue)?job.metadata.queue:[];
