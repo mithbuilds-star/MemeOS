@@ -1550,10 +1550,17 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
   if(changeSongMatch&&method==="POST"){
     const memeId=changeSongMatch[1];
     if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
-    const songId=String(body.song_id||"");
-    if(!/^[0-9a-f-]{36}$/i.test(songId))return fail("Choose a song.");
-    const found=await db(env,"song_library",`?id=eq.${songId}&${userFilter(ctx)}&is_active=eq.true&select=id`);
-    if(!found?.length)return fail("Choose an enabled song from your library.",404);
+    const meme=(await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}&select=id,meme_type,reel_song_id`))?.[0];
+    if(!meme)return fail("Meme not found.",404);
+    if(!meme.meme_type)return fail("This Reel has no type yet. Render it once so it gets a type.",409);
+    // Pick another enabled song of the same type: least used first, never the song already on this Reel.
+    const typeLiteral=encodeURIComponent('{"'+String(meme.meme_type).replace(/["\\]/g,"")+'"}');
+    const candidates=await db(env,"song_library",`?${userFilter(ctx)}&is_active=eq.true&types=cs.${typeLiteral}&select=id,times_used&order=times_used.asc,last_used_at.asc.nullsfirst&limit=100`);
+    const others=(candidates||[]).filter((x:any)=>x.id!==meme.reel_song_id);
+    if(!others.length)return fail("No other enabled song has this Reel's type. Add a song with this type in Song Library.",409);
+    const minUses=Math.min(...others.map((x:any)=>Number(x.times_used||0)));
+    const pool=others.filter((x:any)=>Number(x.times_used||0)===minUses);
+    const songId=pool[Math.floor(Math.random()*pool.length)].id;
     await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"reel",reel_song_override:songId,reel_status:"render_requested",reel_asset_path:null,reel_asset_url:null,reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:null,processing_attempts:0})});
     return json({output_format:"reel",ready:false,song_id:songId});
   }
