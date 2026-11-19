@@ -438,7 +438,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
       : mode==="history"&&simplePointerPatch?.backfill_complete!==true&&simplePointerPatch?.last_scrape_status!=="error"&&!simplePointerPatch?.backfill_stop_reason&&!!nextSource.backfill_before;
     if(shouldContinue){
       const credentials=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
-      if(credentials.length)await startSimplePage(env,ctx,nextSource,credentials,"history",nextSource.backfill_before);
     }
   }
   // The job is completed before chaining so the active-run guard does not see this run.
@@ -767,46 +766,72 @@ async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
   const active=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=in.(running,queued)&metadata->>source_reference_account_id=eq.${encodeURIComponent(sourceId)}&select=id&limit=1`);
   return active.length>0;
 }
-const SIMPLE_PAGE=25;
-// One Apify call for one page of 25 posts. mode "newest": no date filter. mode "history": only posts older than olderThan.
-async function startSimplePage(env:Env,ctx:Ctx,source:any,credentials:any[],mode:"newest"|"history",olderThan:string|null,newerThan:string|null=null){
-  let lastError="No Apify key could start the page.";
-  for(const credential of credentials){
-    if(credential.enabled===false||credential.auto_disabled_reason&&credential.auto_disabled_until&&Date.parse(credential.auto_disabled_until)>Date.now())continue;
-    let actorStarted=false;
-    try{
-      const secret=await decryptSecret(env,credential);
-      const actorId=DEFAULT_APIFY_ACTOR;
-      const actor=encodeURIComponent(actorId.replace("/","~"));
-      // Instagram timestamps are second-precision. Re-scan a one-second overlap and
-      // enforce the exact cursor locally so same-second posts are not silently skipped.
-      const effectiveNewerThan=mode==="newest"&&newerThan?new Date(Date.parse(newerThan)-1000).toISOString():null;
-      const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,effectiveNewerThan,mode==="history"?olderThan:null);
-      // Start asynchronously. Persist the Apify run ID before any dataset import so a Worker
-      // timeout/crash can never leave a running job with no way to recover its posts.
-      const response=await fetch(`https://api.apify.com/v2/acts/${actor}/runs?waitForFinish=0&maxItems=${SIMPLE_PAGE}`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(20000)});
-      const body:any=await response.json().catch(()=>({}));
-      if(!response.ok){lastError=body?.error?.message||`Apify returned ${response.status}.`;continue;}
-      const runId=body?.data?.id;
-      if(!runId){lastError="Apify accepted the page but did not return a run ID.";continue;}
-      actorStarted=true;
-      const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:runId,attempt_count:0,max_attempts:5,metadata:{dataset_id:body.data?.defaultDatasetId||null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:true,phase:"simple",mode,window_newer_than:effectiveNewerThan,window_older_than:mode==="history"?olderThan:null}})});
-      if(!job?.[0]?.id)throw new Error("Apify started the page, but MemeOS could not save its run record. Check Apify runs before retrying to avoid duplicate usage.");
-      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
-      return job[0];
-    }catch(e:any){
-      lastError=e?.message||lastError;
-      // Never start a second provider run after the first one has already started.
-      if(actorStarted)throw e;
-    }
+const SIMPLE_PAGE=10;
+// One page = one Apify call + one job row (created first, so the table shows it as running) + one import.
+async function startPage(env:Env,ctx:Ctx,source:any,credentials:any[],page:{mode:"newest"|"history"|"check";label:string;newerThan?:string|null;olderThan?:string|null}){
+  let lastError="No Apify key could run the page.";
+  const usable=credentials.filter((c:any)=>!(c.enabled===false||c.auto_disabled_reason&&c.auto_disabled_until&&Date.parse(c.auto_disabled_until)>Date.now()));
+  if(!usable.length)throw new Error(`@${source.username}: ${lastError}`);
+  const credential=usable[0];
+  const actorId=DEFAULT_APIFY_ACTOR;
+  const job=await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"running",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,credential_id:credential.id,actor_id:actorId,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:false,phase:"simple",mode:page.mode,page_label:`${source.username} · ${page.label}`,window_newer_than:page.newerThan||null,window_older_than:page.olderThan||null}})});
+  if(!job?.[0]?.id)throw new Error("MemeOS could not save the discovery job.");
+  const jobRow=job[0];
+  let items:any[]=[];
+  try{
+    const secret=await decryptSecret(env,credential);
+    const actor=encodeURIComponent(actorId.replace("/","~"));
+    const input=buildActorInput(credential.actor_input,[source.username],actorId,SIMPLE_PAGE,page.newerThan||null,page.olderThan||null);
+    const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${SIMPLE_PAGE}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
+    const body:any=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(body?.error?.message||`Apify returned ${response.status}.`);
+    items=Array.isArray(body)?body:[];
+    await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_used_at:new Date().toISOString(),status:"connected",cooldown_until:null})});
+  }catch(error:any){
+    const reason=`Apify fetch failed: ${String(error?.message||error).slice(0,250)}`;
+    await db(env,"jobs",`?id=eq.${jobRow.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:reason})}).catch(()=>{});
+    throw new Error(`@${source.username}: ${reason}`);
   }
-  throw new Error(`@${source.username}: ${lastError}`);
+  try{
+    return await runApifyPoll(env,ctx,jobRow,items);
+  }catch(error:any){
+    const reason=`Import failed: ${String(error?.message||error).slice(0,250)}`;
+    console.error("Page import failed", jobRow.id, reason);
+    await db(env,"jobs",`?id=eq.${jobRow.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:reason})}).catch(()=>{});
+    throw error;
+  }
 }
-// Start the newest page; historical pages are chained only after the previous page is safely imported.
-async function runSimpleCycle(env:Env,ctx:Ctx,source:any,credentials:any[]){
-  // Incremental newest-page runs must use the account cursor; otherwise every run
-  // downloads the same newest posts and reports them as duplicates.
-  return await startSimplePage(env,ctx,source,credentials,"newest",null,source.last_scraped_at||null);
+async function postedBoundary(env:Env,ctx:Ctx,source:any,direction:"asc"|"desc"):Promise<string|null>{
+  const rows=await db(env,"memes",`?${userFilter(ctx)}&source_reference_account_id=eq.${encodeURIComponent(source.id)}&source_posted_at=not.is.null&select=source_posted_at&order=source_posted_at.${direction}&limit=1`);
+  return rows?.[0]?.source_posted_at||null;
+}
+// "run": three pages of 10, newest first, each older than the oldest saved post. "check": posts newer than the latest saved post.
+async function runDiscoveryForAccount(env:Env,ctx:Ctx,source:any,credentials:any[],kind:"run"|"check"){
+  if(kind==="run"){
+    await startPage(env,ctx,source,credentials,{mode:"newest",label:"page 1 of 3"});
+    for(let k=2;k<=3;k++){
+      const oldest=await postedBoundary(env,ctx,source,"asc");
+      if(!oldest)break;
+      await startPage(env,ctx,source,credentials,{mode:"history",label:`page ${k} of 3`,olderThan:oldest});
+      // Stop early when the page came back short: history has run out.
+      const rows=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&order=created_at.desc&limit=1&select=metadata`);
+      if(Number(rows?.[0]?.metadata?.items_seen??0)<SIMPLE_PAGE)break;
+    }
+    return;
+  }
+  const newest=await postedBoundary(env,ctx,source,"desc");
+  if(!newest){await startPage(env,ctx,source,credentials,{mode:"newest",label:"check (no saved posts yet)"});return;}
+  let olderThan:string|null=null;
+  for(let k=1;k<=3;k++){
+    const result:any=await startPage(env,ctx,source,credentials,{mode:"check",label:`check page ${k}`,newerThan:newest,olderThan});
+    void result;
+    // The next page needs the oldest post on this page; read it from the job we just finished.
+    const rows=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&order=created_at.desc&limit=1&select=metadata`);
+    const seen=Number(rows?.[0]?.metadata?.items_seen??0);
+    if(seen<SIMPLE_PAGE)break;
+    olderThan=rows?.[0]?.metadata?.oldest_post_at||null;
+    if(!olderThan)break;
+  }
 }
 
 async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentials:any[],scheduled=false,phase="incremental",backfillBefore?:string|null,deepLimit?:number|null,deepOlderThan?:string|null){
@@ -1023,7 +1048,8 @@ async function runScheduledDiscovery(env:Env){
     for(const source of selected){
       try{
         if(await hasActiveDiscoveryForSource(env,ctx,source.id))continue;
-        await runSimpleCycle(env,ctx,source,creds);startedCount++;
+        // Discovery is started from the Discovery page only (no automatic runs).
+        startedCount++;
       }catch(e:any){console.error("Scheduled discovery start failed",source.username,String(e?.message||e));}
     }
     if(settingsRows.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:startedCount?new Date().toISOString():settings.last_discovery_started_at,discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ownerId,last_discovery_started_at:startedCount?new Date().toISOString():null,discovery_interval_minutes:60,discovery_lock_until:null})});
@@ -1752,7 +1778,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     else {patch.global_paused=typeof body.global_paused==="boolean"?body.global_paused:false;patch.auto_process_enabled=typeof body.auto_process_enabled==="boolean"?body.auto_process_enabled:true;patch.discovery_interval_minutes=patch.discovery_interval_minutes||60;await db(env,"user_settings","",{method:"POST",body:JSON.stringify(patch)});}
     return json({ok:true});
   }
-  if(p==="/discovery/run"&&method==="POST"){
+  if((p==="/discovery/run"||p==="/discovery/check")&&method==="POST"){
+    const kind:"run"|"check"=p==="/discovery/check"?"check":"run";
     const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)return fail("Global automation is paused. Resume it in Settings first.",423);
     const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
     if(!creds.length)return fail("Add and enable an Apify API key in Settings → API Manager first.",503);
@@ -1767,13 +1794,13 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     for(const source of sources){
       try{
         if(await hasActiveDiscoveryForSource(env,ctx,source.id)){errors.push(`@${source.username}: a discovery run is already active; skipped a duplicate run.`);continue;}
-        const job=await runSimpleCycle(env,ctx,source,creds);
-        jobs.push({job_id:job.id,provider_run_id:job.provider_run_id,source_username:source.username});
+        await runDiscoveryForAccount(env,ctx,source,creds,kind);
+        jobs.push({source_username:source.username});
       }catch(e:any){errors.push(e?.message||String(e));}
     }
     if(!jobs.length)return fail(errors.join(" ")||"No source account could start a discovery run.",502);
     const settingsRow=await db(env,"user_settings",`?${userFilter(ctx)}&select=owner_id`);if(settingsRow.length)await db(env,"user_settings",`?${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_discovery_started_at:new Date().toISOString(),discovery_lock_until:null})});else await db(env,"user_settings","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,last_discovery_started_at:new Date().toISOString(),discovery_interval_minutes:60,discovery_lock_until:null})});
-    return json({job_id:jobs[0]?.job_id,provider_run_id:jobs[0]?.provider_run_id,jobs,started:jobs.length,errors},202);
+    return json({jobs,started:jobs.length,errors},200);
   }
   return fail("Route not found.",404);
 }
