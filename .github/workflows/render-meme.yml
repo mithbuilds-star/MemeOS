@@ -25,6 +25,11 @@ on:
         required: false
         default: ""
         type: string
+      meme_type:
+        description: Type chosen for this meme (matches song types)
+        required: false
+        default: ""
+        type: string
       attempt_token:
         description: Worker attempt token; writes are rejected once ownership moves on
         required: false
@@ -58,6 +63,7 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           MEME_ID: ${{ inputs.meme_id }}
           OWNER_ID: ${{ inputs.owner_id }}
+          MEME_TYPE: ${{ inputs.meme_type }}
           TEXT: ${{ inputs.text }}
           FREEZE_SECONDS: ${{ inputs.freeze_seconds }}
           SONG_ID: ${{ inputs.song_id }}

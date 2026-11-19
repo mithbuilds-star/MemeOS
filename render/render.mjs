@@ -15,6 +15,7 @@ const env = process.env;
 const SUPABASE_URL = (env.SUPABASE_URL || '').replace(/\/$/, '');
 const KEY = env.SUPABASE_SECRET_KEY || '';
 const MEME_ID = env.MEME_ID || '';
+const MEME_TYPE = env.MEME_TYPE || '';
 const OWNER_ID = env.OWNER_ID || '';
 // Attempt token from the Worker. When set, every write must still match the job's processing_token.
 const ATTEMPT_TOKEN = env.ATTEMPT_TOKEN || '';
@@ -150,12 +151,64 @@ function audioAllowed(value) {
   }
 }
 
+// Length in seconds from ffmpeg's own report (no ffprobe needed). Null when it cannot be read.
+function probeDuration(file) {
+  return new Promise((resolve) => {
+    const p = spawn(ffmpegPath, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', () => resolve(null));
+    p.on('close', () => {
+      const m = err.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);
+      resolve(m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : null);
+    });
+  });
+}
+
+// Downloads one song from the library, records its length, and returns it with its local path.
+async function downloadTrack(dir, id) {
+  const url = await signSongUrl(id);
+  if (!audioAllowed(url)) throw new Error('Audio URL must be a signed URL from this MemeOS Supabase song library.');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Could not fetch selected song (${res.status}).`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.byteLength > MAX_AUDIO_BYTES) throw new Error('Selected song exceeds 30 MB.');
+  const file = path.join(dir, `track-${id}.audio`);
+  await writeFile(file, bytes);
+  const seconds = await probeDuration(file);
+  if (seconds !== null) {
+    await fetch(`${SUPABASE_URL}/rest/v1/song_library?id=eq.${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ duration_seconds: seconds }),
+    }).catch(() => {});
+  }
+  return { id, path: file, seconds };
+}
+
+// Least-used enabled song of the same type that is at least `minSeconds` long, excluding one song.
+async function findFittingSong(excludeId, minSeconds) {
+  if (!MEME_TYPE) return null;
+  const literal = encodeURIComponent(`{"${MEME_TYPE.replace(/["\\]/g, '')}"}`);
+  const query = `song_library?owner_id=eq.${encodeURIComponent(OWNER_ID)}&is_active=eq.true&id=neq.${encodeURIComponent(excludeId)}&types=cs.${literal}&duration_seconds=gte.${minSeconds}&select=id,times_used&order=times_used.asc,last_used_at.asc.nullsfirst&limit=1`;
+  const rows = await fetch(`${SUPABASE_URL}/rest/v1/${query}`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } })
+    .then((r) => r.json()).catch(() => []);
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+async function bumpSongUse(song) {
+  await fetch(`${SUPABASE_URL}/rest/v1/song_library?id=eq.${encodeURIComponent(song.id)}`, {
+    method: 'PATCH',
+    headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ times_used: Number(song.times_used || 0) + 1, last_used_at: new Date().toISOString() }),
+  }).catch(() => {});
+}
+
 async function main() {
   requireEnv();
   const text = env.TEXT.trim();
   const freeze = Math.max(0, Math.min(5, Number(env.FREEZE_SECONDS || 2)));
-  const songId = env.SONG_ID || null;
-  const audioUrl = await signSongUrl(songId);
+  let songId = env.SONG_ID || null;
   const dir = await mkdtemp(path.join(tmpdir(), 'memeos-'));
   try {
     const source = path.join(dir, 'bratext-source.mp4');
@@ -171,6 +224,7 @@ async function main() {
       brat: { W, H, BOX_W: 960, BOX_H: 960, BOX_PAD: 60, C_BG: '#b7ff3c', C_TEXT: '#111111', FONT_NAME: 'Arimo', FONT_WEIGHT: 700, fontPaths: [path.join(__dirname, 'fonts', 'Arimo-Bold.ttf')] },
     });
     await writeFile(source, generated);
+    const sourceSeconds = await probeDuration(source);
     // Measure the BRAT box once from the final square frame; the reel and the photo use the same crop.
     await run(['-y', '-hide_banner', '-loglevel', 'error', '-sseof', '-1', '-i', source, '-update', '1', '-q:v', '1', path.join(dir, 'measure.png')]);
     const measured = await centreOffset(path.join(dir, 'measure.png'));
@@ -183,14 +237,24 @@ async function main() {
       : `scale=${REEL_W}:${REEL_W}:flags=lanczos`;
 
     let audioPath = '';
-    if (audioUrl) {
-      if (!audioAllowed(audioUrl)) throw new Error('Audio URL must be a signed URL from this MemeOS Supabase song library.');
-      const res = await fetch(audioUrl);
-      if (!res.ok) throw new Error(`Could not fetch selected song (${res.status}).`);
-      const bytes = Buffer.from(await res.arrayBuffer());
-      if (bytes.byteLength > MAX_AUDIO_BYTES) throw new Error('Selected song exceeds 30 MB.');
-      audioPath = path.join(dir, 'track.audio');
-      await writeFile(audioPath, bytes);
+    let track = songId ? await downloadTrack(dir, songId) : null;
+    if (track) {
+      audioPath = track.path;
+      // A song shorter than the Reel is swapped for a same-type song that covers it, when one exists.
+      // Otherwise the chosen song loops (-stream_loop), and -shortest ends the Reel with the video.
+      const reelSeconds = (sourceSeconds ?? 0) + freeze;
+      if (sourceSeconds !== null && track.seconds !== null && track.seconds < reelSeconds - 0.05) {
+        const alt = await findFittingSong(track.id, reelSeconds);
+        if (alt) {
+          const swapped = await downloadTrack(dir, alt.id);
+          if (swapped.seconds !== null && swapped.seconds >= reelSeconds - 0.05) {
+            track = swapped;
+            audioPath = swapped.path;
+            songId = swapped.id;
+            await bumpSongUse(alt);
+          }
+        }
+      }
     }
 
     const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', source];

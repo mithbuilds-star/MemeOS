@@ -623,15 +623,16 @@ async function renderReelForMeme(env:Env,meme:any,token:string|null){
   const pool=typed.length?typed:songs;
   const minUses=pool.length?Math.min(...pool.map((s:any)=>Number(s.times_used||0))):null;
   const leastUsed=pool.length?pool.filter((s:any)=>Number(s.times_used||0)===minUses):[];
-  const song=leastUsed.length?leastUsed[Math.floor(Math.random()*leastUsed.length)]:null;
+  const forcedSong=meme.reel_song_override?songs.find((x:any)=>x.id===meme.reel_song_override)||null:null;
+  const song=forcedSong||(leastUsed.length?leastUsed[Math.floor(Math.random()*leastUsed.length)]:null);
   const songUrl=song?await signedSongUrl(env,song.storage_path):null;
   const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=video_freeze_seconds`);
   const freeze=Math.max(0,Math.min(5,Number(settings[0]?.video_freeze_seconds??2)));
-  const dispatch=await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render-meme.yml/dispatches`,{method:"POST",headers:{Authorization:`Bearer ${env.GITHUB_TOKEN}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"memeos-worker","Content-Type":"application/json"},body:JSON.stringify({ref:"main",inputs:{meme_id:String(meme.id),owner_id:String(ctx.userId),text:String(meme.extracted_text||"").slice(0,3000),freeze_seconds:String(freeze),song_id:song?.id||"",attempt_token:String(token||"")}})});
+  const dispatch=await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render-meme.yml/dispatches`,{method:"POST",headers:{Authorization:`Bearer ${env.GITHUB_TOKEN}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"memeos-worker","Content-Type":"application/json"},body:JSON.stringify({ref:"main",inputs:{meme_id:String(meme.id),owner_id:String(ctx.userId),text:String(meme.extracted_text||"").slice(0,3000),freeze_seconds:String(freeze),song_id:song?.id||"",meme_type:String(memeType||""),attempt_token:String(token||"")}})});
   if(!dispatch.ok){const detail=(await dispatch.text()).slice(0,200);throw new Error(`GitHub render dispatch failed (${dispatch.status}): ${detail}`);}
   if(song)await db(env,"song_library",`?id=eq.${song.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({times_used:Number(song.times_used||0)+1,last_used_at:new Date().toISOString()})});
   // The renderer writes the final result, matched on this token. Until then the job stays out of the queue.
-  await memeWrite(env,ctx,meme.id,token,{reel_status:"rendering",meme_type:memeType,reel_song_id:song?.id||null,reel_render_locked_until:null,reel_render_next_retry_at:new Date(nowMs+L.DEFAULTS.renderWatchdogMs).toISOString(),processing_error:null,...L.renderDispatchPatch(meme,nowMs)});
+  await memeWrite(env,ctx,meme.id,token,{reel_status:"rendering",meme_type:memeType,reel_song_override:null,reel_song_id:song?.id||null,reel_render_locked_until:null,reel_render_next_retry_at:new Date(nowMs+L.DEFAULTS.renderWatchdogMs).toISOString(),processing_error:null,...L.renderDispatchPatch(meme,nowMs)});
   LOG("render_dispatched",{meme_id:meme.id,attempt:Number(meme.processing_attempts||0)+1,worker_id:token,song_id:song?.id||null});
   return {status:"dispatched"};
 }
@@ -1544,6 +1545,18 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     return json({meme:updated?.[0]});
   }
   // Convert a meme between photo post and Reel. A Reel that doesn't exist yet is queued for render.
+  // Change song: queue a fresh render of this Reel with the chosen song (the sweep picks it up).
+  const changeSongMatch=p.match(/^\/memes\/([0-9a-f-]+)\/change-song$/);
+  if(changeSongMatch&&method==="POST"){
+    const memeId=changeSongMatch[1];
+    if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
+    const songId=String(body.song_id||"");
+    if(!/^[0-9a-f-]{36}$/i.test(songId))return fail("Choose a song.");
+    const found=await db(env,"song_library",`?id=eq.${songId}&${userFilter(ctx)}&is_active=eq.true&select=id`);
+    if(!found?.length)return fail("Choose an enabled song from your library.",404);
+    await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"reel",reel_song_override:songId,reel_status:"render_requested",reel_asset_path:null,reel_asset_url:null,reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:null,processing_attempts:0})});
+    return json({output_format:"reel",ready:false,song_id:songId});
+  }
   const formatMatch=p.match(/^\/memes\/([0-9a-f-]+)\/format$/);
   if(formatMatch&&method==="POST"){
     const memeId=formatMatch[1];
