@@ -1096,14 +1096,11 @@ async function refreshCredentialUsage(env:Env,ctx:Ctx,row:any){
       return snapshot;
     }
   }else if(row.provider==="groq"){
-    // Rate-limit headers are returned on inference responses, not reliably by /models.
-    const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",messages:[{role:"user",content:"Reply with OK."}],max_completion_tokens:1,temperature:0})});
-    const h=response.headers;
-    const numberHeader=(name:string)=>{const value=h.get(name);if(value===null)return null;const n=Number(value);return Number.isFinite(n)?n:null;};
-    const limited=response.status===429||numberHeader("x-ratelimit-remaining-requests")===0||numberHeader("x-ratelimit-remaining-tokens")===0;
-    if(response.status===401||response.status===403){await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:refreshedAt})});throw new Error("Groq rejected this API key. Check it in API Manager.");}if(!response.ok&&response.status!==429)throw new Error(`Groq usage check failed (${response.status}): ${(await response.text()).slice(0,180)}`);
-    snapshot={provider:"groq",refreshed_at:refreshedAt,rate_limited:limited,request_limit:numberHeader("x-ratelimit-limit-requests"),request_remaining:numberHeader("x-ratelimit-remaining-requests"),request_reset:h.get("x-ratelimit-reset-requests"),token_limit:numberHeader("x-ratelimit-limit-tokens"),token_remaining:numberHeader("x-ratelimit-remaining-tokens"),token_reset:h.get("x-ratelimit-reset-tokens"),retry_after:h.get("retry-after"),http_status:response.status};
-  }else return null;
+    // Validate the key without sending an inference request or consuming rate-limit quota.
+    const response=await fetch("https://api.groq.com/openai/v1/models",{headers:{Authorization:"Bearer "+secret}});
+    if(response.status===401||response.status===403){await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"error",cooldown_until:null,last_used_at:refreshedAt})});throw new Error("Groq rejected this API key. Check it in API Manager.");}
+    if(!response.ok)throw new Error(`Groq key check failed (${response.status}).`);
+    snapshot={provider:"groq",refreshed_at:refreshedAt,rate_limit_data_unavailable:true,rate_limit_note:"Usage counters require an inference response; refresh does not spend quota."};}else return null;
   const limited=row.provider==="groq"&&snapshot.rate_limited;
   const retryAfter=Number(snapshot.retry_after);
   await db(env,"api_credentials",`?id=eq.${row.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({usage_snapshot:snapshot,usage_refreshed_at:refreshedAt,status:limited?"rate_limited":"connected",cooldown_until:limited?new Date(Date.now()+(Number.isFinite(retryAfter)&&retryAfter>0?retryAfter*1000:60000)).toISOString():null,last_used_at:refreshedAt})});
