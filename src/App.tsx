@@ -10,9 +10,9 @@ import { Overview, Accounts, Discovery, Queue, Library, Creator, Scheduler, Publ
 const nav = [
   ["Overview", "/", LayoutDashboard], ["Accounts", "/accounts", Users],
   ["Discovery", "/discovery", Compass], ["Approval Queue", "/queue", CheckCheck],
-  ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage], ["Meme Creator", "/creator", Clapperboard],
-  ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow],
-  ["Analytics", "/analytics", BarChart3], ["System Health", "/health", HeartPulse], ["Activity Log", "/activity", History], ["Pipeline", "/pipeline", GitBranch],
+  ["Meme Creator", "/creator", Clapperboard], ["Content Library", "/library", Database], ["Song Library", "/songs", FileImage],
+  ["Scheduler", "/scheduler", CalendarDays], ["Publishing", "/publishing", Workflow], ["Analytics", "/analytics", BarChart3],
+  ["Pipeline", "/pipeline", GitBranch], ["Activity Log", "/activity", History], ["System Health", "/health", HeartPulse],
   ["Settings", "/settings", Settings]
 ] as const;
 
