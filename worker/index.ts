@@ -793,9 +793,10 @@ const SIMPLE_PAGE=10;
 async function enqueueSourcePages(env:Env,ctx:Ctx,source:any,kind:"run"|"check"){
   const pending=await db(env,"jobs",`?${userFilter(ctx)}&job_type=eq.discovery&status=eq.pending&metadata->>source_reference_account_id=eq.${encodeURIComponent(source.id)}&select=id&limit=1`);
   if(pending.length)return 0;
-  const pages=kind==="check"
+  // "Run discovery" checks for newer posts (cheap, runs on the timer too). "Historical backfill" walks the 500 newest posts.
+  const pages=kind==="run"
     ?[{mode:"check",label:"check newer posts"}]
-    :[{mode:"history",label:"page 1 of 2"},{mode:"history",label:"page 2 of 2"}];
+    :[{mode:"history",label:"historical backfill"}];
   let count=0;
   for(const page of pages){
     await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"pending",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,phase:"simple",mode:page.mode,kind,page_label:`${source.username} · ${page.label}`,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:false}})});
@@ -863,7 +864,7 @@ async function runNextPendingPage(env:Env){
     const secret=await decryptSecret(env,credential);
     const actor=encodeURIComponent(actorId.replace("/","~"));
     // History pages scan the newest 500 posts (the actor has no older-than filter); the Worker keeps only posts older than the oldest saved post.
-    const pageLimit=500;
+    const pageLimit=mode==="check"?20:500;
     const input=buildActorInput(credential.actor_input,[source.username],actorId,pageLimit,newerThan,olderThan);
     const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${pageLimit}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
     const body:any=await response.json().catch(()=>null);
