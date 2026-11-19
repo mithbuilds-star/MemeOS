@@ -630,7 +630,7 @@ function cleanOcrText(text:string,handle?:string|null){
     let out=line.replace(/@[\w.]+/g,"");
     if(handleRe)out=out.replace(handleRe,"");
     return out.replace(/\s+/g," ").trim();
-  }).filter(Boolean).join("\n");
+  }).filter(Boolean).join(" ");
 }
 async function processMemeInBackground(env:Env,meme:any,token:string){
   const ctx:Ctx={userId:meme.owner_id,token:""};
