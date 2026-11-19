@@ -260,8 +260,9 @@ export function Scheduler() {
       const booked=manualBookings.filter(i=>{const d=new Date(i.scheduled_at);return d.getFullYear()===dayDate.getFullYear()&&d.getMonth()===dayDate.getMonth()&&d.getDate()===dayDate.getDate()});
       const used=new Set(booked.map(i=>{const d=new Date(i.scheduled_at);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}));
       const remaining=Math.max(0,postsPerDay-booked.length);if(!remaining)continue;
-      const preferredSlots=["08:00","09:00","10:00","13:00","14:00","15:00","18:00","19:00","20:00","21:00","22:00"];
-      const available=preferredSlots.filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)});
+      const zones=[{start:9,end:11},{start:13,end:15},{start:18,end:20},{start:21,end:22}];
+      const available=zones.flatMap(z=>Array.from({length:(z.end-z.start)*4+1},(_,i)=>{const m=z.start*60+i*15;return String(Math.floor(m/60)).padStart(2,"0")+":"+String(m%60).padStart(2,"0")})).filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)});
+
       const count=Math.min(remaining,available.length,queue.length-plan.length);if(!count)continue;
       const target=postsPerDay===1?(offset%2===0?{posts:1,reels:0}:{posts:0,reels:1}):(mixes[postsPerDay]||{posts:Math.ceil(postsPerDay*.6),reels:Math.floor(postsPerDay*.4)});
       const takeReels=Math.min(target.reels,count),takePhotos=Math.min(target.posts,count-takeReels);
@@ -272,9 +273,16 @@ export function Scheduler() {
       while(daily.length<count&&reelIndex<reels.length)daily.push(reels[reelIndex++]);
       while(daily.length<count&&photoIndex<photos.length)daily.push(photos[photoIndex++]);
       if(!daily.length)break;
-      const slotSets:Record<number,string[]>={1:["18:00"],2:["08:00","18:00"],3:["08:00","13:00","18:00"],4:["08:00","13:00","18:00","19:00"],5:["08:00","13:00","18:00","19:00","20:00"],6:["08:00","09:00","13:00","18:00","19:00","20:00"],7:["08:00","09:00","10:00","13:00","18:00","19:00","20:00"],8:["08:00","09:00","10:00","13:00","14:00","18:00","19:00","20:00"],9:["08:00","09:00","10:00","13:00","14:00","15:00","18:00","19:00","20:00"],10:["08:00","09:00","10:00","13:00","14:00","15:00","18:00","19:00","21:00","22:00"]};
-      const desired=slotSets[count]||slotSets[10];
-      const spread=desired.filter(t=>available.includes(t));
+      const zoneSets:Record<number,number[]>={1:[2],2:[0,2],3:[0,1,2],4:[0,1,2,2],5:[0,1,2,2,2],6:[0,0,1,2,2,2],7:[0,0,0,1,2,2,2],8:[0,0,0,1,1,2,2,2],9:[0,0,0,1,1,1,2,2,2],10:[0,0,0,1,1,1,2,2,3]};
+      const desired=zoneSets[count]||zoneSets[10];
+      // Stable date-based randomization: the same date stays stable on refresh,
+      // while each new day gets different times within its allowed windows.
+      let seed=Array.from(date).reduce((s,ch)=>(s*31+ch.charCodeAt(0))>>>0,2166136261);
+      const rnd=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};
+      const spread=desired.map(zoneIndex=>{
+        const z=zones[zoneIndex];const choices=available.filter(t=>{const h=Number(t.slice(0,2));return h>=z.start&&h<=z.end});
+        return choices.length?choices[Math.floor(rnd()*choices.length)]:null;
+      }).filter((t):t is string=>!!t);
       for(const t of available)if(spread.length<count&&!spread.includes(t))spread.push(t);
       spread.sort();
       for(let n=0;n<daily.length;n++){const time=spread[n];if(!time)continue;plan.push({assignment:daily[n],scheduled_at:new Date(date+"T"+time+":00").toISOString()});if(plan.length>=queue.length)break;}
