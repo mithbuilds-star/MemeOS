@@ -260,7 +260,8 @@ export function Scheduler() {
       const booked=manualBookings.filter(i=>{const d=new Date(i.scheduled_at);return d.getFullYear()===dayDate.getFullYear()&&d.getMonth()===dayDate.getMonth()&&d.getDate()===dayDate.getDate()});
       const used=new Set(booked.map(i=>{const d=new Date(i.scheduled_at);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}));
       const remaining=Math.max(0,postsPerDay-booked.length);if(!remaining)continue;
-      const available=ranked[dayDate.getDay()].filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)}).sort();
+      const preferredSlots=["08:00","09:00","10:00","13:00","14:00","15:00","18:00","19:00","20:00","21:00","22:00"];
+      const available=preferredSlots.filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)});
       const count=Math.min(remaining,available.length,queue.length-plan.length);if(!count)continue;
       const target=postsPerDay===1?(offset%2===0?{posts:1,reels:0}:{posts:0,reels:1}):(mixes[postsPerDay]||{posts:Math.ceil(postsPerDay*.6),reels:Math.floor(postsPerDay*.4)});
       const takeReels=Math.min(target.reels,count),takePhotos=Math.min(target.posts,count-takeReels);
@@ -271,7 +272,11 @@ export function Scheduler() {
       while(daily.length<count&&reelIndex<reels.length)daily.push(reels[reelIndex++]);
       while(daily.length<count&&photoIndex<photos.length)daily.push(photos[photoIndex++]);
       if(!daily.length)break;
-      const spread=count===1?[available[Math.floor((available.length-1)/2)]]:Array.from({length:count},(_,n)=>available[Math.round(n*(available.length-1)/Math.max(1,count-1))]);
+      const slotSets:Record<number,string[]>={1:["18:00"],2:["08:00","18:00"],3:["08:00","13:00","18:00"],4:["08:00","13:00","18:00","19:00"],5:["08:00","13:00","18:00","19:00","20:00"],6:["08:00","09:00","13:00","18:00","19:00","20:00"],7:["08:00","09:00","10:00","13:00","18:00","19:00","20:00"],8:["08:00","09:00","10:00","13:00","14:00","18:00","19:00","20:00"],9:["08:00","09:00","10:00","13:00","14:00","15:00","18:00","19:00","20:00"],10:["08:00","09:00","10:00","13:00","14:00","15:00","18:00","19:00","21:00","22:00"]};
+      const desired=slotSets[count]||slotSets[10];
+      const spread=desired.filter(t=>available.includes(t));
+      for(const t of available)if(spread.length<count&&!spread.includes(t))spread.push(t);
+      spread.sort();
       for(let n=0;n<daily.length;n++){const time=spread[n];if(!time)continue;plan.push({assignment:daily[n],scheduled_at:new Date(date+"T"+time+":00").toISOString()});if(plan.length>=queue.length)break;}
     }
     return plan;
