@@ -204,7 +204,7 @@ export function Library() {
   const isDiscovered=(m:any)=>!isGenerated(m);
   const reject=async(m:any)=>{setBusy(m.id);setMessage("");try{await api(`/memes/${m.id}/reject`,{method:"POST",body:"{}"});setMessage("Rejected. Removed from the library and the approval queue.");load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
   const saveText=async(m:any,text:string)=>{setBusy(m.id);setMessage("");try{await api(`/memes/${m.id}`,{method:"PATCH",body:JSON.stringify({extracted_text:text})});setMessage("Text saved. Processing again.");load()}catch(e:any){setMessage(e.message)}finally{setBusy("")}};
-  const isErrored=(m:any)=>m.processing_status!=="rejected"&&m.classification!=="rejected"&&!approved.has(m.id)&&(["low_confidence","processing_failed","media_unavailable"].includes(m.processing_status)||!!m.processing_error||m.reel_status==="render_failed);
+  const isErrored=(m:any)=>m.processing_status!=="rejected"&&m.classification!=="rejected"&&!approved.has(m.id)&&(["low_confidence","processing_failed","media_unavailable"].includes(m.processing_status)||!!m.processing_error||m.reel_status==="render_failed");
   const errored=memes.filter(isErrored);
   const baseShown=filter==="errored"?errored:memes.filter((m:any)=>approved.has(m.id)&&m.processing_status!=="rejected"&&m.classification!=="rejected").filter((m:any)=>filter==="all"||(filter==="discovered"?isDiscovered(m):isGenerated(m)));
   const shown=baseShown.filter((m:any)=>contentType==="all"||matchesContentType(m,assignmentFormats.filter((a:any)=>a.meme_id===m.id&&a.approval_status==="approved"),contentType==="reels"?"reels":"posts"));
