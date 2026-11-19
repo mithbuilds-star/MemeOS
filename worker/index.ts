@@ -596,6 +596,19 @@ async function renewLease(env:Env,ctx:Ctx,id:string,token:string){
   await memeWrite(env,ctx,id,token,L.renewPatch(Date.now()));
 }
 
+// Song choice rule, used everywhere a song is picked: a song used in the last 12 hours is skipped
+// when another song of the same type is free; then the least-used song wins. Falls back to the
+// least-used song when every song of the type was used recently, so a Reel is never left without one.
+const SONG_COOLDOWN_MS=12*60*60*1000;
+function choosePoolSong(pool:any[]):any{
+  if(!pool.length)return null;
+  const now=Date.now();
+  const cooled=pool.filter((s:any)=>!s.last_used_at||now-new Date(s.last_used_at).getTime()>=SONG_COOLDOWN_MS);
+  const base=cooled.length?cooled:pool;
+  const minUses=Math.min(...base.map((s:any)=>Number(s.times_used||0)));
+  const least=base.filter((s:any)=>Number(s.times_used||0)===minUses);
+  return least[Math.floor(Math.random()*least.length)];
+}
 async function renderReelForMeme(env:Env,meme:any,token:string|null){
   const ctx:Ctx={userId:meme.owner_id,token:""};
   const nowMs=Date.now();
@@ -621,10 +634,8 @@ async function renderReelForMeme(env:Env,meme:any,token:string|null){
   const typed=memeType?songs.filter((s:any)=>Array.isArray(s.types)&&s.types.includes(memeType)):[];
   if(memeType&&!typed.length)LOG("song_type_fallback",{meme_id:meme.id,meme_type:memeType,worker_id:token});
   const pool=typed.length?typed:songs;
-  const minUses=pool.length?Math.min(...pool.map((s:any)=>Number(s.times_used||0))):null;
-  const leastUsed=pool.length?pool.filter((s:any)=>Number(s.times_used||0)===minUses):[];
   const forcedSong=meme.reel_song_override?songs.find((x:any)=>x.id===meme.reel_song_override)||null:null;
-  const song=forcedSong||(leastUsed.length?leastUsed[Math.floor(Math.random()*leastUsed.length)]:null);
+  const song=forcedSong||choosePoolSong(pool);
   const songUrl=song?await signedSongUrl(env,song.storage_path):null;
   const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=video_freeze_seconds`);
   const freeze=Math.max(0,Math.min(5,Number(settings[0]?.video_freeze_seconds??2)));
@@ -1555,12 +1566,10 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(!meme.meme_type)return fail("This Reel has no type yet. Render it once so it gets a type.",409);
     // Pick another enabled song of the same type: least used first, never the song already on this Reel.
     const typeLiteral=encodeURIComponent('{"'+String(meme.meme_type).replace(/["\\]/g,"")+'"}');
-    const candidates=await db(env,"song_library",`?${userFilter(ctx)}&is_active=eq.true&types=cs.${typeLiteral}&select=id,times_used&order=times_used.asc,last_used_at.asc.nullsfirst&limit=100`);
+    const candidates=await db(env,"song_library",`?${userFilter(ctx)}&is_active=eq.true&types=cs.${typeLiteral}&select=id,times_used,last_used_at&order=times_used.asc,last_used_at.asc.nullsfirst&limit=100`);
     const others=(candidates||[]).filter((x:any)=>x.id!==meme.reel_song_id);
     if(!others.length)return fail("No other enabled song has this Reel's type. Add a song with this type in Song Library.",409);
-    const minUses=Math.min(...others.map((x:any)=>Number(x.times_used||0)));
-    const pool=others.filter((x:any)=>Number(x.times_used||0)===minUses);
-    const songId=pool[Math.floor(Math.random()*pool.length)].id;
+    const songId=choosePoolSong(others).id;
     await db(env,"memes",`?id=eq.${memeId}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({output_format:"reel",reel_song_override:songId,reel_status:"render_requested",reel_asset_path:null,reel_asset_url:null,reel_render_next_retry_at:null,reel_render_locked_until:null,processing_error:null,processing_attempts:0})});
     return json({output_format:"reel",ready:false,song_id:songId});
   }

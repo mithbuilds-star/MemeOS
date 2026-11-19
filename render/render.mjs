@@ -186,14 +186,26 @@ async function downloadTrack(dir, id) {
   return { id, path: file, seconds };
 }
 
-// Least-used enabled song of the same type that is at least `minSeconds` long, excluding one song.
+// Same song choice rule as the Worker: skip songs used in the last 12 hours when others are free, then least-used.
+const SONG_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+function chooseSong(pool) {
+  if (!pool.length) return null;
+  const now = Date.now();
+  const cooled = pool.filter((s) => !s.last_used_at || now - new Date(s.last_used_at).getTime() >= SONG_COOLDOWN_MS);
+  const base = cooled.length ? cooled : pool;
+  const minUses = Math.min(...base.map((s) => Number(s.times_used || 0)));
+  const least = base.filter((s) => Number(s.times_used || 0) === minUses);
+  return least[Math.floor(Math.random() * least.length)];
+}
+
+// Enabled songs of the same type that are at least `minSeconds` long, excluding one song, chosen by the rule above.
 async function findFittingSong(excludeId, minSeconds) {
   if (!MEME_TYPE) return null;
   const literal = encodeURIComponent(`{"${MEME_TYPE.replace(/["\\]/g, '')}"}`);
-  const query = `song_library?owner_id=eq.${encodeURIComponent(OWNER_ID)}&is_active=eq.true&id=neq.${encodeURIComponent(excludeId)}&types=cs.${literal}&duration_seconds=gte.${minSeconds}&select=id,times_used&order=times_used.asc,last_used_at.asc.nullsfirst&limit=1`;
+  const query = `song_library?owner_id=eq.${encodeURIComponent(OWNER_ID)}&is_active=eq.true&id=neq.${encodeURIComponent(excludeId)}&types=cs.${literal}&duration_seconds=gte.${minSeconds}&select=id,times_used,last_used_at&limit=100`;
   const rows = await fetch(`${SUPABASE_URL}/rest/v1/${query}`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } })
     .then((r) => r.json()).catch(() => []);
-  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+  return Array.isArray(rows) ? chooseSong(rows) : null;
 }
 
 async function bumpSongUse(song) {
