@@ -320,6 +320,17 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
       if(row.source_post_id)knownKeys.add(String(row.source_post_id));
     }
   }
+  // Posts from other sources on this owner's account: one batched lookup for the whole page instead of one per post.
+  const pageIds=new Set<string>();
+  for(const entry of page.eligible){
+    const k=entry.identity.key;
+    if(k&&!knownKeys.has(k)&&/^[A-Za-z0-9_-]+$/.test(k))pageIds.add(k);
+    for(const legacy of entry.identity.legacyIds||[]){if(!knownKeys.has(legacy)&&/^[A-Za-z0-9_-]+$/.test(legacy))pageIds.add(legacy);}
+  }
+  if(pageIds.size){
+    const found=await db(env,"memes",`?${userFilter(ctx)}&source_post_id=in.(${[...pageIds].join(",")})&select=source_post_id&limit=${Math.max(100,pageIds.size)}`);
+    for(const row of found||[])if(row.source_post_id)knownKeys.add(String(row.source_post_id));
+  }
   // Cloudflare caps subrequests per invocation. Each new post costs several (media, upload, insert),
   // so a poll imports at most MAX_IMPORTS_PER_POLL posts and the rest are picked up by the next poll.
   let partial=false;
@@ -327,9 +338,6 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   for (const [entryIndex, entry] of page.eligible.entries()) {
     const n = normalizeApifyItem(entry.item);
     if(knownKeys.size&&((entry.identity.key&&knownKeys.has(entry.identity.key))||(entry.identity.legacyIds||[]).some((id:string)=>knownKeys.has(id)))){counts.duplicates++;continue;}
-    // Dedupe under every identity format this post may have been saved with; the DB unique index is the final guard.
-    const clause=D.dedupeOrClause(entry.identity);
-    if(clause){const found=await db(env,"memes",`?${userFilter(ctx)}&${clause}&select=id&limit=1`);if(found.length){counts.duplicates++;continue;}}
     if(!preItems&&counts.inserted>=MAX_IMPORTS_PER_POLL){partial=true;processedIndex=entryIndex;break;}
     let assetUrl:string|null=null, assetPath:string|null=null;
     if (n.image) {
