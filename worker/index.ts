@@ -861,7 +861,7 @@ async function runNextPendingPage(env:Env){
     const secret=await decryptSecret(env,credential);
     const actor=encodeURIComponent(actorId.replace("/","~"));
     // History pages scan the newest 500 posts (the actor has no older-than filter); the Worker keeps only posts older than the oldest saved post.
-    const pageLimit=50;
+    const pageLimit=500;
     const input=buildActorInput(credential.actor_input,[source.username],actorId,pageLimit,newerThan,olderThan);
     const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${pageLimit}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
     const body:any=await response.json().catch(()=>null);
