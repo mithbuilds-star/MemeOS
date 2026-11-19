@@ -55,8 +55,8 @@ async function db(env: Env, table: string, path = "", init: RequestInit = {}) {
   return body ? JSON.parse(body) : null;
 }
 
-function b64ToBytes(value: string): Uint8Array {
-  const raw = atob(value); return Uint8Array.from(raw, c => c.charCodeAt(0));
+function b64ToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const raw = atob(value); return Uint8Array.from(raw, c => c.charCodeAt(0)) as Uint8Array<ArrayBuffer>;
 }
 function bytesToB64(value: Uint8Array): string {
   let raw = ""; value.forEach(v => raw += String.fromCharCode(v)); return btoa(raw);
@@ -163,7 +163,7 @@ async function disableApifyKeyUntilCycleEnds(env:Env,ctx:Ctx,credential:any,secr
   await db(env,"api_credentials","?id=eq."+credential.id+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({enabled:false,status:"limit_reached",auto_disabled_reason:"apify_monthly_limit",auto_disabled_until:cycleEnd,usage_snapshot:snapshot,usage_refreshed_at:now,last_used_at:now,cooldown_until:null})});
   credential.enabled=false;credential.status="limit_reached";credential.auto_disabled_reason="apify_monthly_limit";credential.auto_disabled_until=cycleEnd;credential.usage_snapshot=snapshot;
 }
-async function apifyRequestWithFallback(env:Env,ctx:Ctx,url:string){
+async function apifyRequestWithFallback(env:Env,ctx:Ctx,url:string,init:RequestInit={}){
   const now=new Date().toISOString();
   const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.apify&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(now)})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
   if(!creds.length)throw new Error("No available Apify API key. Enable another key in Settings → API Manager.");
@@ -188,7 +188,7 @@ async function apifyRequestWithFallback(env:Env,ctx:Ctx,url:string){
 
 async function apifyRequestForDiscoveryJob(env:Env,ctx:Ctx,url:string,job:any,init:RequestInit={}){
   const credentialId=job.metadata?.credential_id;
-  if(!credentialId)return apifyRequestWithFallback(env,ctx,url);
+  if(!credentialId)return apifyRequestWithFallback(env,ctx,url,init);
   // Actor runs and datasets belong to the Apify account that started them.
   // Never poll them with a different user's/key's token: a 403/404 from the
   // wrong account is not evidence that the fallback key is invalid.
@@ -383,7 +383,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   // Simple jobs (newest 25, then older pages of 25) manage their own pointer below; the old planner is skipped.
   if(source&&job.metadata?.phase!=="simple"){
     // Incremental jobs always fetch newest-first (no date window), so they use the "newest" rule: no catch-up chaining.
-    plan=D.planAdvance(phase==="incremental"?"newest":phase,source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors,inserted:counts.inserted},jobCreatedMs);
+    plan=D.planAdvance((phase==="incremental"?"newest":phase) as "newest"|"backfill"|"reanchor",source,{rawCount:page.rawCount,inWindowCount:page.inWindowCount,oldestInWindowMs:page.oldestInWindowMs,newestInWindowMs:page.newestInWindowMs,insertErrors:counts.insertErrors,inserted:counts.inserted},jobCreatedMs);
     if(plan.ok) await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify(plan.patch)});
     else {
       await db(env,"reference_accounts",`?id=eq.${source.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({last_scrape_status:"error"})});
@@ -1129,7 +1129,7 @@ async function recoverErroredApifyKeys(env:Env,ctx:Ctx){
 
 async function runScheduledDiscovery(env:Env){
   const active=await db(env,"instagram_accounts","?discovery_enabled=eq.true&select=owner_id");
-  const owners=[...new Set(active.map((a:any)=>a.owner_id))].slice(0,1);const now=Date.now();
+  const owners=[...new Set<string>(active.map((a:any)=>String(a.owner_id)))].slice(0,1);const now=Date.now();
   for(const ownerId of owners){
     const ctx:Ctx={userId:ownerId,token:""};
     const settingsRows=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused,discovery_interval_minutes,last_discovery_started_at,last_usage_refresh_date`);
