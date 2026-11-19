@@ -214,3 +214,10 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 .song-type-edit{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .song-type-edit input{min-width:180px}
 .song-type-view{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* Scheduler captions backfill: occupy full width beneath both auto controls. */
+.scheduler-auto-controls{display:grid;grid-template-columns:auto auto;align-items:end;gap:10px 12px}
+.scheduler-caption-backfill{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--panel2);box-sizing:border-box}
+.scheduler-caption-backfill span{font-size:11px;color:var(--muted);font-weight:600}
+.scheduler-caption-backfill .btn{padding:10px 14px;min-height:40px;white-space:nowrap}
+@media(max-width:620px){.scheduler-auto-controls{grid-template-columns:1fr 1fr;width:100%;flex-shrink:1}.scheduler-caption-backfill{flex-direction:column;align-items:stretch}.scheduler-caption-backfill .btn{width:100%;justify-content:center}}
