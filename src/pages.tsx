@@ -151,28 +151,21 @@ export function Discovery() {
 }
 
 function mediaFileType(m:any, assignments:any[]=[]):"posts"|"reels"|null {
-  // The destination assignment controls what will actually be published.
-  // A meme can have different formats for different destination accounts.
-  const formats=assignments
-    .filter((a:any)=>a?.meme_id===m?.id && a?.publish_format)
-    .map((a:any)=>String(a.publish_format).trim().toLowerCase());
-  if(formats.includes("reel"))return "reels";
-  if(formats.includes("photo"))return "posts";
-  // Fall back to the meme's generation format for items not assigned yet.
+  // Classify by the actual media file extension, not stale assignment metadata.
+  const reelUrl=String(m?.reel_asset_url??"").trim();
+  if(/\\.mp4(?:$|[?#])/i.test(reelUrl))return "reels";
+  const assetUrl=String(m?.asset_url??"").trim();
+  if(/\\.(?:jpe?g|png|webp|gif)(?:$|[?#])/i.test(assetUrl))return "posts";
+  // Fallback for media URLs without a recognizable extension.
   const format=String(m?.output_format??"").trim().toLowerCase();
   if(format==="reel"||format==="reels")return "reels";
   if(format==="photo"||format==="post"||format==="posts")return "posts";
-  const reelUrl=String(m?.reel_asset_url??"").trim();
-  if(reelUrl||m?.reel_status==="generated")return "reels";
-  const assetUrl=String(m?.asset_url??"").trim();
-  if(/\.mp4(?:$|[?#])/i.test(assetUrl))return "reels";
+  if(reelUrl)return "reels";
   if(assetUrl)return "posts";
   return null;
 }
 function matchesContentType(m:any, assignments:any[], wanted:"posts"|"reels"):boolean {
-  const formats=assignments.filter((a:any)=>a?.meme_id===m?.id&&a?.publish_format).map((a:any)=>String(a.publish_format).trim().toLowerCase());
-  if(formats.length)return formats.some((format:string)=>wanted==="reels"?format==="reel":format==="photo");
-  return mediaFileType(m)===wanted;
+  return mediaFileType(m,assignments)===wanted;
 }
 function useMemes() { const [memes,setMemes]=useState<Meme[]>([]);const [error,setError]=useState("");const requested=useRef(0);const applied=useRef(0);const load=()=>{const mine=++requested.current;return api("/memes").then(r=>{if(mine>applied.current){applied.current=mine;setMemes(r.memes||[]);}}).catch(e=>{if(mine>applied.current)setError(e.message);});};useEffect(()=>{load();const timer=window.setInterval(load,15000);return()=>window.clearInterval(timer)},[]);return {memes,error,load}; }
 export function Queue() {
