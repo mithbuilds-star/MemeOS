@@ -207,3 +207,10 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 
 /* Selected value shown on the Posts/Day trigger (e.g. 2×) */
 .posts-per-day .dd-trigger > span:first-child{font-size:9px!important;font-weight:800;line-height:1}
+
+.song-types-input{display:grid;gap:6px;margin:0 0 16px}
+.song-types-input label{display:grid;gap:6px}
+.song-types-input small{color:var(--muted,#888)}
+.song-type-edit{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.song-type-edit input{min-width:180px}
+.song-type-view{display:flex;gap:8px;align-items:center;flex-wrap:wrap}

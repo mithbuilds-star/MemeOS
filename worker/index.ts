@@ -484,6 +484,38 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
 }
 
 
+// Shared Groq JSON call with the same key rotation and cooldown handling as the other Groq steps.
+async function groqJsonChat(env:Env,ctx:Ctx,system:string,user:string){
+  const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.groq&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
+  if(!creds.length)throw new Error("No enabled Groq API key. Add one in Settings → API Manager.");
+  let lastError="No Groq key could process this request.";
+  for(const credential of creds){
+    try{
+      const secret=await decryptSecret(env,credential);
+      const response=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify({model:"openai/gpt-oss-20b",temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:system},{role:"user",content:user}]})});
+      const data:any=await response.json().catch(()=>({}));
+      if(!response.ok){lastError=data.error?.message||`Groq returned ${response.status}.`;await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:credentialFailureStatus(response.status,credential.status),cooldown_until:response.status===429?new Date(Date.now()+5*60*1000).toISOString():null,last_used_at:new Date().toISOString()})});continue;}
+      await db(env,"api_credentials",`?id=eq.${credential.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({status:"connected",cooldown_until:null,last_used_at:new Date().toISOString()})});
+      return JSON.parse(data.choices?.[0]?.message?.content||"{}");
+    }catch(e:any){lastError=e.message||lastError;}
+  }
+  throw new Error(lastError);
+}
+// AI watermark pass: removes account names, handles, site names and credit lines; keeps the meme text.
+async function removeWatermarkWithGroq(env:Env,ctx:Ctx,text:string,sourceAccount?:string|null){
+  const parsed=await groqJsonChat(env,ctx,
+    "You clean OCR text from a meme screenshot. Remove only watermark or attribution text: account names, @handles, usernames, site or app names, follow or credit lines, and URLs. Keep every word of the meme itself exactly as written. Never rewrite, correct, summarize or improve the meme text. Return JSON only: {\"text\":string} on one line.",
+    `Source account name (may appear as a watermark): ${sourceAccount||"unknown"}\nOCR text:\n${text}`);
+  return String(parsed.text??"").replace(/\s+/g," ").trim();
+}
+// Picks exactly one type from the list the user entered on their songs. Returns null when nothing matches.
+async function pickMemeTypeWithGroq(env:Env,ctx:Ctx,text:string,types:string[]){
+  const parsed=await groqJsonChat(env,ctx,
+    "Choose exactly one type for a meme's text from the supplied list. The type must be copied exactly from the list; never invent a type. Return JSON only: {\"type\":string}.",
+    `Types: ${JSON.stringify(types)}\nMeme text:\n${text.slice(0,3000)}`);
+  const chosen=String(parsed.type||"").trim().toLowerCase();
+  return types.find((t)=>t.toLowerCase()===chosen)||null;
+}
 async function classifyTextWithGroq(env:Env,ctx:Ctx,text:string){
   const creds=await db(env,"api_credentials",`?${userFilter(ctx)}&provider=eq.groq&enabled=eq.true&or=(cooldown_until.is.null,cooldown_until.lte.${encodeURIComponent(new Date().toISOString())})&status=neq.error&select=*&order=last_used_at.asc.nullsfirst,created_at.asc`);
   if(!creds.length)throw new Error("No enabled Groq API key. Add one in Settings → API Manager.");
@@ -579,8 +611,18 @@ async function renderReelForMeme(env:Env,meme:any,token:string|null){
   // Every dispatch counts as an attempt. Once the limit is reached the job is failed, not re-dispatched.
   if(L.shouldFailRender(meme))return {status:"attempts_exhausted"};
   const songs=await db(env,"song_library",`?${userFilter(ctx)}&is_active=eq.true&select=*&order=times_used.asc,last_used_at.asc.nullsfirst&limit=100`);
-  const minUses=songs.length?Math.min(...songs.map((s:any)=>Number(s.times_used||0))):null;
-  const leastUsed=songs.length?songs.filter((s:any)=>Number(s.times_used||0)===minUses):[];
+  // The meme's type is chosen once from the types entered on the songs, then stored on the meme.
+  const songTypes=[...new Set(songs.flatMap((s:any)=>Array.isArray(s.types)?s.types:[]))] as string[];
+  let memeType:string|null=meme.meme_type||null;
+  if(!memeType&&songTypes.length&&String(meme.extracted_text||"").trim()){
+    memeType=await withTimeout(pickMemeTypeWithGroq(env,ctx,String(meme.extracted_text),songTypes),L.DEFAULTS.attemptTimeoutMs,"Song type matching");
+    if(!memeType)throw new Error("AI could not match this text to a song type.");
+  }
+  const typed=memeType?songs.filter((s:any)=>Array.isArray(s.types)&&s.types.includes(memeType)):[];
+  if(memeType&&!typed.length)LOG("song_type_fallback",{meme_id:meme.id,meme_type:memeType,worker_id:token});
+  const pool=typed.length?typed:songs;
+  const minUses=pool.length?Math.min(...pool.map((s:any)=>Number(s.times_used||0))):null;
+  const leastUsed=pool.length?pool.filter((s:any)=>Number(s.times_used||0)===minUses):[];
   const song=leastUsed.length?leastUsed[Math.floor(Math.random()*leastUsed.length)]:null;
   const songUrl=song?await signedSongUrl(env,song.storage_path):null;
   const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=video_freeze_seconds`);
@@ -589,7 +631,7 @@ async function renderReelForMeme(env:Env,meme:any,token:string|null){
   if(!dispatch.ok){const detail=(await dispatch.text()).slice(0,200);throw new Error(`GitHub render dispatch failed (${dispatch.status}): ${detail}`);}
   if(song)await db(env,"song_library",`?id=eq.${song.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({times_used:Number(song.times_used||0)+1,last_used_at:new Date().toISOString()})});
   // The renderer writes the final result, matched on this token. Until then the job stays out of the queue.
-  await memeWrite(env,ctx,meme.id,token,{reel_status:"rendering",reel_song_id:song?.id||null,reel_render_locked_until:null,reel_render_next_retry_at:new Date(nowMs+L.DEFAULTS.renderWatchdogMs).toISOString(),processing_error:null,...L.renderDispatchPatch(meme,nowMs)});
+  await memeWrite(env,ctx,meme.id,token,{reel_status:"rendering",meme_type:memeType,reel_song_id:song?.id||null,reel_render_locked_until:null,reel_render_next_retry_at:new Date(nowMs+L.DEFAULTS.renderWatchdogMs).toISOString(),processing_error:null,...L.renderDispatchPatch(meme,nowMs)});
   LOG("render_dispatched",{meme_id:meme.id,attempt:Number(meme.processing_attempts||0)+1,worker_id:token,song_id:song?.id||null});
   return {status:"dispatched"};
 }
@@ -653,6 +695,9 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
     finally{LOG("ocr_request",{meme_id:current.id,worker_id:token,attempt:Number(current.processing_attempts||0)+1,duration_ms:Date.now()-started,provider:"workers_ai",provider_response:providerOutcome});}
     // Remove watermark text: @handles and the source account name are not part of the meme.
     extracted=cleanOcrText(extracted,current.source_username);
+    // AI watermark check: keeps the meme text, strips any remaining account or site watermark.
+    try{extracted=await withTimeout(removeWatermarkWithGroq(env,ctx,extracted,current.source_username),timeoutMs,"Watermark check");}
+    catch(e:any){LOG("watermark_check_failed",{meme_id:current.id,worker_id:token,error:String(e?.message||e).slice(0,200)});}
     if(!extracted){
       await memeWrite(env,ctx,current.id,token,{processing_status:"low_confidence",classification:"needs_review",classification_reason:"No readable text was confidently extracted. Manual review required.",processing_error:null,processing_locked_until:null,processing_token:null,processing_next_retry_at:null});
       LOG("status_change",{meme_id:current.id,previous_status:"needs_ocr",new_status:"low_confidence",worker_id:token});
