@@ -1406,7 +1406,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
 
   if(p==="/activity"&&method==="GET"){
     const [saved,jobs,memes,assignments,publishing]=await Promise.all([
-      db(env,"activity_logs",`?${userFilter(ctx)}&select=id,event_type,message,metadata,created_at&order=created_at.desc&limit=300`),
+      db(env,"activity_logs",`?${userFilter(ctx)}&select=id,event_type,message,metadata,created_at&order=created_at.desc&limit=1000`),
       db(env,"jobs",`?${userFilter(ctx)}&select=id,job_type,status,created_at,started_at,completed_at,last_error&order=created_at.desc&limit=1000`),
       db(env,"memes",`?${userFilter(ctx)}&select=id,source_type,processing_status,classification,created_at&order=created_at.desc&limit=5000`),
       db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=id,approval_status,status,created_at&order=created_at.desc&limit=5000`),
@@ -1607,11 +1607,8 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     if(publishFormat==="auto"){publishFormat=ready?.output_format==="reel"?"reel":"photo";}
     if(decision==="approved"&&publishFormat==="photo"&&(ready?.processing_status!=="generated"||!ready?.asset_url))return fail("The BRAT final-frame photo asset is not ready yet.",409);
     if(decision==="approved"&&publishFormat==="reel"&&(ready?.reel_status!=="generated"||!ready?.reel_asset_url||!ready?.reel_song_id))return fail("The Reel and selected song are not ready yet.",409);
-    if(decision==="approved"&&!String(ready?.social_caption||"").trim()){
-      const caption=await generateCaptionWithGroq(env,ctx,ready||{});
-      await db(env,"memes","?id=eq."+memeId+"&"+userFilter(ctx),{method:"PATCH",body:JSON.stringify({social_caption:caption})});
-      ready.social_caption=caption;
-    }
+    // Caption generation is intentionally decoupled from approval. A Groq failure must never
+    // prevent a user's approval from being persisted. Missing captions can be generated in Scheduler.
     if(body.account_id){
       if(!await owned(env,"instagram_accounts",String(body.account_id),ctx))return fail("Destination account not found.",404);
       const existing=await db(env,"account_meme_assignments",`?${userFilter(ctx)}&meme_id=eq.${memeId}&destination_account_id=eq.${body.account_id}&select=id`);
