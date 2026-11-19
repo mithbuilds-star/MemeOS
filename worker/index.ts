@@ -847,11 +847,12 @@ async function runNextPendingPage(env:Env){
   const usable=creds.filter((c:any)=>!(c.enabled===false||c.auto_disabled_reason&&c.auto_disabled_until&&Date.parse(c.auto_disabled_until)>Date.now()));
   const mode=job.metadata?.mode;
   let newerThan:string|null=null, olderThan:string|null=null;
-  if(mode==="history") olderThan=await postedBoundary(env,ctx,source.id,"asc");
+  // History runs take the newest posts with no date bound. Posts already saved are skipped on import,
+  // so posts saved in a gap between older and newer history are still picked up.
+  void 0;
   // Page 1 and "check newer posts" ask only for posts newer than the newest saved post. Posts already saved are
   // not requested, so nothing is paid for duplicates. With nothing saved yet, page 1 runs without a filter.
   if(mode==="check"||mode==="newest") newerThan=await postedBoundary(env,ctx,source.id,"desc");
-  if(mode==="history"&&!olderThan){await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),last_error:"No saved posts to go older than; history skipped."})});return;}
   if(!usable.length){await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),last_error:"No enabled Apify key is available."})});return;}
   const credential=usable[0];
   const actorId=DEFAULT_APIFY_ACTOR;
