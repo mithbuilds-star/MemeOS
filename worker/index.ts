@@ -434,7 +434,7 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
   }
   if(job.metadata?.queue_batch){
     // One per-minute batch of a queued run: the queue tick owns the offset, status and cursors.
-    return {done:false,status:"importing",inserted:counts.inserted};
+    return {done:false,status:"importing",inserted:counts.inserted,duplicates:counts.duplicates,insertErrors:counts.insertErrors};
   }
   if(partial){
     // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
@@ -816,9 +816,9 @@ async function importQueueTick(env:Env,job:any){
   const queue:any[]=Array.isArray(job.metadata?.queue)?job.metadata.queue:[];
   const offset=Number(job.metadata?.queue_offset||0);
   const batch=queue.slice(offset,offset+QUEUE_BATCH);
-  let batchInserted=0;
+  let batchInserted=0, batchDuplicates=0, batchErrors=0;
   try{
-    if(batch.length){const result:any=await runApifyPoll(env,ctx,{...job,metadata:{...job.metadata,queue_batch:true}},batch);batchInserted=Number(result?.inserted||0);}
+    if(batch.length){const result:any=await runApifyPoll(env,ctx,{...job,metadata:{...job.metadata,queue_batch:true}},batch);batchInserted=Number(result?.inserted||0);batchDuplicates=Number(result?.duplicates||0);batchErrors=Number(result?.insertErrors||0);}
   }catch(error:any){
     await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,200)}`})}).catch(()=>{});
     return;
@@ -826,7 +826,7 @@ async function importQueueTick(env:Env,job:any){
   const next=offset+batch.length;
   const done=next>=queue.length;
   await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({
-    metadata:{...job.metadata,queue:done?null:queue,queue_offset:next,queue_remaining:Math.max(0,queue.length-next),inserted:Number(job.metadata?.inserted||0)+batchInserted},
+    metadata:{...job.metadata,queue:done?null:queue,queue_offset:next,queue_remaining:Math.max(0,queue.length-next),inserted:Number(job.metadata?.inserted||0)+batchInserted,duplicates:Number(job.metadata?.duplicates||0)+batchDuplicates,insert_errors:Number(job.metadata?.insert_errors||0)+batchErrors},
     ...(done?{status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:null}:{}),
   })});
 }
@@ -883,7 +883,7 @@ async function runNextPendingPage(env:Env){
       const t=normalizeApifyItem(item).postedAt;
       return !t||Date.parse(t)<olderMs;
     });
-    const queued={...job,metadata:{...metadata,queue:kept,queue_offset:0,queue_remaining:kept.length}};
+    const queued={...job,metadata:{...metadata,items_seen:items.length,queue:kept,queue_offset:0,queue_remaining:kept.length}};
     await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({metadata:queued.metadata})});
     await importQueueTick(env,queued);
   }catch(error:any){
