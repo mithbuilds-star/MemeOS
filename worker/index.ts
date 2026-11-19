@@ -109,10 +109,10 @@ function normalizeApifyItem(item: any) {
   const identity = D.discoveryIdentity(item);
   const permalink = identity.permalink;
   const postId = identity.key;
-  const image = firstString(item,["media.displayUrl","media.thumbnailUrl","displayUrl","display_url","imageUrl","image_url","thumbnailUrl","images.0.url"]);
+  const image = firstString(item,["media.displayUrl","media.thumbnailUrl","displayUrl","display_url","imageUrl","image_url","thumbnailUrl","images.0.url","media.0.media_url","media.0.cover_url"]);
   const caption = firstString(item,["caption","text","description","alt"]);
   const type = firstString(item,["mediaType","productType","type"]) || "IMAGE";
-  const rawDate = item?.timestamp ?? item?.takenAt ?? item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
+  const rawDate = item?.taken_at ?? item?.timestamp ?? item?.takenAt ??item?.takenAtTimestamp ?? item?.takenAtIso ?? item?.timestampIso ?? item?.date ?? item?.createdAt ?? item?.publishedAt;
   let postedAt:string|null=null;
   if(typeof rawDate==="number"&&Number.isFinite(rawDate))postedAt=new Date(rawDate<1000000000000?rawDate*1000:rawDate).toISOString();
   else if(typeof rawDate==="string"&&rawDate.trim()){const parsed=new Date(rawDate);if(!Number.isNaN(parsed.getTime()))postedAt=parsed.toISOString();}
@@ -759,7 +759,7 @@ async function runWaitingReels(env:Env){
   }
 }
 
-const DEFAULT_APIFY_ACTOR = "coregent/instagram-posts-scraper";
+const DEFAULT_APIFY_ACTOR = "intropix/instagram-posts-reels-scraper";
 const SCRAPE_BATCH=25;
 
 async function hasActiveDiscoveryForSource(env:Env,ctx:Ctx,sourceId:string){
@@ -888,25 +888,24 @@ async function startApifyDiscoveryForSource(env:Env,ctx:Ctx,source:any,credentia
   throw new Error(`@${source.username}: ${lastError}`);
 }
 function buildActorInput(template:any,usernames:string[],actorId=DEFAULT_APIFY_ACTOR,limit=SCRAPE_BATCH,newerThan?:string|null,olderThan?:string|null){
-  const saved=template&&typeof template==="object"&&!Array.isArray(template)?structuredClone(template):{};
-  // Keep only settings that Coregent documents. Legacy actor input keys such as
-  // directUrls, resultsType and onlyPostsNewerThan are intentionally discarded.
-  const input:any={};
-  for(const key of ["mediaTypes","includeCarouselChildren","includeOwnerDetails","includeMediaUrls","maxConcurrency","maxRetries","debugMode"]){
-    if(saved[key]!==undefined)input[key]=saved[key];
-  }
-  input.profiles=usernames.map((u:string)=>u.replace(/^@/,""));
-  input.resultsLimit=Math.max(1,Math.min(100,limit));
-  if(newerThan){
-    const parsed=new Date(newerThan);
-    if(!Number.isNaN(parsed.getTime()))input.postsNewerThan=parsed.toISOString();
-  }
-  if(olderThan){
-    const parsed=new Date(olderThan);
-    if(!Number.isNaN(parsed.getTime())){
-      input.postsOlderThan=parsed.toISOString();
-    }
-  }
+  // intropix/instagram-posts-reels-scraper: maxPosts is the read budget; sinceDate/untilDate are UTC dates
+  // (inclusive). Saved template keys from the old actor are discarded. Repeats are removed by dedupe.
+  const input:any={
+    usernames:usernames.map((u:string)=>u.replace(/^@/,"")),
+    maxPosts:Math.max(1,Math.min(100,limit)),
+    mediaType:"any",
+    includeViews:false,
+    includeOffGridReels:false,
+  };
+  const day=(value?:string|null)=>{
+    if(!value)return null;
+    const parsed=new Date(value);
+    return Number.isNaN(parsed.getTime())?null:parsed.toISOString().slice(0,10);
+  };
+  const since=day(newerThan);
+  const until=day(olderThan);
+  if(since)input.sinceDate=since;
+  if(until)input.untilDate=until;
   return input;
 }
 
