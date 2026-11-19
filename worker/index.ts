@@ -622,6 +622,16 @@ async function findDuplicateText(env:Env,ctx:Ctx,memeId:string,text:string):Prom
   }
 }
 
+// Removes watermark text from OCR output: @handles and the source account name are not part of the meme.
+function cleanOcrText(text:string,handle?:string|null){
+  const h=String(handle||"").replace(/^@/,"").trim();
+  const handleRe=h?new RegExp(h.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"gi"):null;
+  return String(text||"").split(/\r?\n/).map((line)=>{
+    let out=line.replace(/@[\w.]+/g,"");
+    if(handleRe)out=out.replace(handleRe,"");
+    return out.replace(/\s+/g," ").trim();
+  }).filter(Boolean).join("\n");
+}
 async function processMemeInBackground(env:Env,meme:any,token:string){
   const ctx:Ctx={userId:meme.owner_id,token:""};
   const timeoutMs=L.DEFAULTS.attemptTimeoutMs;
@@ -641,6 +651,8 @@ async function processMemeInBackground(env:Env,meme:any,token:string){
     try{extracted=await withTimeout(extractTextWithWorkersAI(env,bytes,contentType),timeoutMs,"OCR request");}
     catch(e:any){providerOutcome=String(e?.message||e).slice(0,200);throw e;}
     finally{LOG("ocr_request",{meme_id:current.id,worker_id:token,attempt:Number(current.processing_attempts||0)+1,duration_ms:Date.now()-started,provider:"workers_ai",provider_response:providerOutcome});}
+    // Remove watermark text: @handles and the source account name are not part of the meme.
+    extracted=cleanOcrText(extracted,current.source_username);
     if(!extracted){
       await memeWrite(env,ctx,current.id,token,{processing_status:"low_confidence",classification:"needs_review",classification_reason:"No readable text was confidently extracted. Manual review required.",processing_error:null,processing_locked_until:null,processing_token:null,processing_next_retry_at:null});
       LOG("status_change",{meme_id:current.id,previous_status:"needs_ocr",new_status:"low_confidence",worker_id:token});
@@ -753,7 +765,7 @@ async function runWaitingReels(env:Env){
     const rows=await db(env,"memes",`?id=eq.${encodeURIComponent(m.id)}&${userFilter(ctx)}&processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=eq.rendering`,{method:"PATCH",body:JSON.stringify(body)});
     LOG("render_watchdog_expired",{meme_id:m.id,previous_status:m.processing_status,new_status:_terminal?"discarded":"retry_wait",attempt:_attempt,reason:msg,database_update:rows?.length?"ok":"no_match"});
   }
-  const sel="&select=id,owner_id,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_consecutive_errors,processing_same_error_count,processing_last_error_key,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
+  const sel="&select=id,owner_id,source_username,extracted_text,reel_asset_url,reel_song_id,reel_status,processing_status,processing_attempts,processing_consecutive_errors,processing_same_error_count,processing_last_error_key,processing_token,output_format,reel_render_next_retry_at&order=created_at.asc&limit=10";
   const auto=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=in.(renderer_not_configured,render_requested)&or=(reel_render_next_retry_at.is.null,reel_render_next_retry_at.lte.${encodeURIComponent(nowIso)})${sel}`);
   const manual=await db(env,"memes",`?processing_status=in.(ready_for_asset,generated)&classification=neq.low_confidence&reel_status=eq.render_failed&reel_render_next_retry_at=lte.${encodeURIComponent(nowIso)}${sel}`);
   const pending=[...auto,...manual].slice(0,10);
