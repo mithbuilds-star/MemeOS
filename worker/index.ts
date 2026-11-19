@@ -784,7 +784,7 @@ async function enqueueSourcePages(env:Env,ctx:Ctx,source:any,kind:"run"|"check")
   if(pending.length)return 0;
   const pages=kind==="check"
     ?[{mode:"check",label:"check newer posts"}]
-    :[{mode:"newest",label:"page 1 of 2"},{mode:"history",label:"page 2 of 2"}];
+    :[{mode:"history",label:"page 1 of 2"},{mode:"history",label:"page 2 of 2"}];
   let count=0;
   for(const page of pages){
     await db(env,"jobs","",{method:"POST",body:JSON.stringify({owner_id:ctx.userId,job_type:"discovery",status:"pending",provider_run_id:null,attempt_count:0,max_attempts:5,metadata:{dataset_id:null,phase:"simple",mode:page.mode,kind,page_label:`${source.username} · ${page.label}`,source_usernames:[source.username],source_reference_account_id:source.id,scheduled:false}})});
