@@ -810,7 +810,9 @@ async function runNextPendingPage(env:Env){
   const mode=job.metadata?.mode;
   let newerThan:string|null=null, olderThan:string|null=null;
   if(mode==="history") olderThan=await postedBoundary(env,ctx,source.id,"asc");
-  if(mode==="check") newerThan=await postedBoundary(env,ctx,source.id,"desc");
+  // Page 1 and "check newer posts" ask only for posts newer than the newest saved post. Posts already saved are
+  // not requested, so nothing is paid for duplicates. With nothing saved yet, page 1 runs without a filter.
+  if(mode==="check"||mode==="newest") newerThan=await postedBoundary(env,ctx,source.id,"desc");
   if(mode==="history"&&!olderThan){await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"completed",completed_at:new Date().toISOString(),last_error:"No saved posts to go older than; history skipped."})});return;}
   if(!usable.length){await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),last_error:"No enabled Apify key is available."})});return;}
   const credential=usable[0];
