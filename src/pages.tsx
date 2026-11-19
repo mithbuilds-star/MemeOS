@@ -262,7 +262,7 @@ export function Scheduler() {
       const remaining=Math.max(0,postsPerDay-booked.length);if(!remaining)continue;
       const available=ranked[dayDate.getDay()].filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)}).sort();
       const count=Math.min(remaining,available.length,queue.length-plan.length);if(!count)continue;
-      const target=mixes[postsPerDay]||{posts:Math.ceil(postsPerDay*.6),reels:Math.floor(postsPerDay*.4)};
+      const target=postsPerDay===1?(offset%2===0?{posts:1,reels:0}:{posts:0,reels:1}):(mixes[postsPerDay]||{posts:Math.ceil(postsPerDay*.6),reels:Math.floor(postsPerDay*.4)});
       const takeReels=Math.min(target.reels,count),takePhotos=Math.min(target.posts,count-takeReels);
       let daily:any[]=[];
       for(let n=0;n<takeReels&&reelIndex<reels.length;n++)daily.push(reels[reelIndex++]);
