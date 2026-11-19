@@ -1664,7 +1664,7 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     }
     return json({scheduled:results.length,assignments:results});
   }
-  if(p==="/assignments"&&method==="GET") return json({assignments:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=*,memes(id,extracted_text,original_caption,social_caption,asset_url,source_permalink,classification,reel_asset_url,reel_status,reel_song_id),instagram_accounts(id,username)&order=created_at.desc&limit=300`)});
+  if(p==="/assignments"&&method==="GET") return json({assignments:await db(env,"account_meme_assignments",`?${userFilter(ctx)}&select=*,memes(id,extracted_text,original_caption,social_caption,asset_url,source_permalink,classification,reel_asset_url,reel_status,reel_song_id),instagram_accounts(id,username)&order=created_at.desc&limit=1000`)});
   const assignmentMatch=p.match(/^\/assignments\/([0-9a-f-]+)$/);
   if(assignmentMatch&&method==="PATCH"){
     const rows=await db(env,"account_meme_assignments",`?id=eq.${assignmentMatch[1]}&${userFilter(ctx)}&select=*`);if(!rows.length)return fail("Assignment not found.",404);
