@@ -279,10 +279,8 @@ export function Scheduler() {
       // while each new day gets different times within its allowed windows.
       let seed=Array.from(date).reduce((s,ch)=>(s*31+ch.charCodeAt(0))>>>0,2166136261);
       const rnd=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};
-      const spread=desired.map(zoneIndex=>{
-        const z=zones[zoneIndex];const choices=available.filter(t=>{const h=Number(t.slice(0,2));return h>=z.start&&h<=z.end});
-        return choices.length?choices[Math.floor(rnd()*choices.length)]:null;
-      }).filter((t):t is string=>!!t);
+      const spread:string[]=[];
+      for(const zoneIndex of desired){const z=zones[zoneIndex];const choices=available.filter(t=>{const h=Number(t.slice(0,2));return h>=z.start&&h<=z.end&&!spread.includes(t)});if(choices.length)spread.push(choices[Math.floor(rnd()*choices.length)]);}
       for(const t of available)if(spread.length<count&&!spread.includes(t))spread.push(t);
       spread.sort();
       for(let n=0;n<daily.length;n++){const time=spread[n];if(!time)continue;plan.push({assignment:daily[n],scheduled_at:new Date(date+"T"+time+":00").toISOString()});if(plan.length>=queue.length)break;}
