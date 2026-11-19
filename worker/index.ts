@@ -425,6 +425,10 @@ async function runApifyPoll(env: Env, ctx: Ctx, job: any, preItems?: any[]) {
       }
     }
   }
+  if(job.metadata?.queue_batch){
+    // One per-minute batch of a queued run: the queue tick owns the offset, status and cursors.
+    return {done:false,status:"importing",inserted:counts.inserted};
+  }
   if(partial){
     // Not finished: leave the job running with no cursor change. The next poll re-reads this dataset,
     // skips the posts already imported, and continues with the rest.
@@ -797,9 +801,33 @@ async function postedBoundary(env:Env,ctx:Ctx,sourceId:string,direction:"asc"|"d
   return rows?.[0]?.source_posted_at||null;
 }
 // Runs the oldest pending page, one at a time across the whole account.
+// Imports the next QUEUE_BATCH posts of a queued run. Each scheduler tick is its own Worker invocation,
+// so every batch gets a fresh Cloudflare request budget.
+const QUEUE_BATCH=6;
+async function importQueueTick(env:Env,job:any){
+  const ctx:Ctx={userId:job.owner_id,token:""};
+  const queue:any[]=Array.isArray(job.metadata?.queue)?job.metadata.queue:[];
+  const offset=Number(job.metadata?.queue_offset||0);
+  const batch=queue.slice(offset,offset+QUEUE_BATCH);
+  try{
+    if(batch.length)await runApifyPoll(env,ctx,{...job,metadata:{...job.metadata,queue_batch:true}},batch);
+  }catch(error:any){
+    await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,200)}`})}).catch(()=>{});
+    return;
+  }
+  const next=offset+batch.length;
+  const done=next>=queue.length;
+  await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({
+    metadata:{...job.metadata,queue:done?null:queue,queue_offset:next,queue_remaining:Math.max(0,queue.length-next)},
+    ...(done?{status:"completed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:null}:{}),
+  })});
+}
 async function runNextPendingPage(env:Env){
-  const active=await db(env,"jobs",`?job_type=eq.discovery&status=eq.running&select=id&limit=1`);
-  if(active.length)return;
+  const active=await db(env,"jobs",`?job_type=eq.discovery&status=eq.running&select=*&limit=1`);
+  if(active.length){
+    if(Array.isArray(active[0].metadata?.queue))await importQueueTick(env,active[0]);
+    return;
+  }
   const rows=await db(env,"jobs",`?job_type=eq.discovery&status=eq.pending&select=*&order=created_at.asc&limit=1`);
   const job=rows?.[0];
   if(!job)return;
@@ -826,7 +854,7 @@ async function runNextPendingPage(env:Env){
     const secret=await decryptSecret(env,credential);
     const actor=encodeURIComponent(actorId.replace("/","~"));
     // History pages scan the newest 500 posts (the actor has no older-than filter); the Worker keeps only posts older than the oldest saved post.
-    const pageLimit=mode==="history"?500:SIMPLE_PAGE;
+    const pageLimit=50;
     const input=buildActorInput(credential.actor_input,[source.username],actorId,pageLimit,newerThan,olderThan);
     const response=await fetch(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?timeout=290&maxItems=${pageLimit}&clean=true&format=json`,{method:"POST",headers:{Authorization:`Bearer ${secret}`,"Content-Type":"application/json"},body:JSON.stringify(input),signal:AbortSignal.timeout(295000)});
     const body:any=await response.json().catch(()=>null);
@@ -837,8 +865,11 @@ async function runNextPendingPage(env:Env){
     await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Apify fetch failed: ${String(error?.message||error).slice(0,250)}`})}).catch(()=>{});
     return;
   }
+  // Store the fetched posts on the job; runNextPendingPage imports QUEUE_BATCH of them on each scheduler tick.
   try{
-    await runApifyPoll(env,ctx,{...job,metadata},items);
+    const queued={...job,metadata:{...metadata,queue:items,queue_offset:0,queue_remaining:items.length}};
+    await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({metadata:queued.metadata})});
+    await importQueueTick(env,queued);
   }catch(error:any){
     await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({status:"failed",completed_at:new Date().toISOString(),locked_until:null,next_retry_at:null,last_error:`Import failed: ${String(error?.message||error).slice(0,250)}`})}).catch(()=>{});
   }
@@ -1863,6 +1894,8 @@ export default {
       const ctx:Ctx={userId:job.owner_id,token:""};
       try {
         const settings=await db(env,"user_settings",`?${userFilter(ctx)}&select=global_paused`);if(settings[0]?.global_paused)continue;
+        // Queued runs (metadata.queue) are imported one batch per minute by runNextPendingPage, not by this loop.
+        if(job.metadata?.queue)continue;
         const lease=await db(env,"jobs",`?id=eq.${job.id}&${userFilter(ctx)}&status=in.(running,queued)&or=(locked_until.is.null,locked_until.lte.${encodeURIComponent(now)})`,{method:"PATCH",body:JSON.stringify({last_attempt_at:now,locked_until:new Date(Date.now()+5*60*1000).toISOString()})});
         if(!lease?.length)continue;
         polledJobs++;
