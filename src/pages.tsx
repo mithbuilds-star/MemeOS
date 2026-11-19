@@ -228,7 +228,7 @@ export function Scheduler() {
   const [captionStatus,setCaptionStatus]=useState("");
   const [calendarOpen,setCalendarOpen]=useState<string|null>(null);
   const [calendarMonth,setCalendarMonth]=useState(new Date());
-  const load=()=>api("/assignments").then(r=>setItems((r.assignments||[]).filter((x:any)=>x.status==="scheduled"||(x.approval_status==="approved"&&!x.scheduled_at&&!["published","rejected","failed","needs_review"].includes(x.status))))).catch(e=>setError(e.message));
+  const load=()=>api("/assignments").then(r=>setItems((r.assignments||[]).filter((x:any)=>x.status==="scheduled"||(x.approval_status==="approved"&&!x.scheduled_at&&!["published","rejected","failed","needs_review"].includes(x.status))).sort((a:any,b:any)=>{const ta=a.scheduled_at?new Date(a.scheduled_at).getTime():0,tb=b.scheduled_at?new Date(b.scheduled_at).getTime():0;return tb-ta||new Date(b.created_at).getTime()-new Date(a.created_at).getTime()})).catch(e=>setError(e.message));
   useEffect(()=>{load();api("/settings").then(r=>{setAutoPost(!!r.settings?.auto_post_enabled);setPostsPerDay(Math.max(1,Math.min(10,Number(r.settings?.posts_per_day||3))))}).catch(e=>setError(e.message));const timer=setInterval(load,15000);return()=>clearInterval(timer)},[]);
   const localDate=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
   const schedule=async(id:string)=>{setBusy(id);setError("");try{const value=times[id];if(!value?.date||!value?.time)throw new Error("Enter both a date and time.");const time=value.time.trim();if(!/^([01]?\\d|2[0-3]):[0-5]\\d$/.test(time))throw new Error("Enter time as HH:MM (24-hour), e.g. 18:17.");const normalized=time.length===4?"0"+time:time;const local=new Date(value.date+"T"+normalized+":00");if(Number.isNaN(local.getTime())||local.getTime()<=Date.now())throw new Error("Choose a future date and time.");await api("/assignments/"+id,{method:"PATCH",body:JSON.stringify({scheduled_at:local.toISOString()})});await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};
@@ -236,7 +236,7 @@ export function Scheduler() {
   const activateSavedSchedule=async(item:any)=>{setBusy(item.id);setError("");try{await api("/assignments/"+item.id,{method:"PATCH",body:JSON.stringify({scheduled_at:item.scheduled_at})});await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};
   const saveCaption=async(id:string)=>{setBusy(id);setError("");try{await api("/memes/"+id+"/caption",{method:"PATCH",body:JSON.stringify({social_caption:captionDraft})});setEditingCaption(null);await load()}catch(e:any){setError(e.message)}finally{setBusy("")}};  const missingCaptionIds=Array.from(new Set(items.filter(i=>!String(i.memes?.social_caption||"").trim()&&(String(i.memes?.extracted_text||"").trim()||String(i.memes?.original_caption||"").trim())).map(i=>i.meme_id)));
   const backfillCaptions=async()=>{if(captionBusy||!missingCaptionIds.length)return;setCaptionBusy(true);setCaptionStatus("");setError("");let total=0,remaining=missingCaptionIds.length,rounds=0,failed=false;try{while(remaining>0&&rounds<60){rounds++;const result=await api("/captions/backfill",{method:"POST",body:JSON.stringify({meme_ids:missingCaptionIds})});total+=Number(result.generated||0);remaining=Number(result.remaining||0);failed=failed||!!(result.failed?.length);setCaptionStatus("Generated "+total+" caption(s). "+remaining+" remaining…");if(!result.generated&&remaining>0){failed=true;break;}}await load();setCaptionStatus(total?"Generated "+total+" missing caption(s)."+(failed?" Some could not be generated; check the Groq key or meme text and retry.":remaining?" More posts remain; click again to continue.":""):"No captions were generated. Check that a Groq key is enabled and the memes have readable text.");}catch(e:any){setCaptionStatus(e.message||"Caption backfill failed.");}finally{setCaptionBusy(false);}};
-  const buildAutoSlots=(queueCount:number,manualBookings:any[])=>{
+  const buildAutoPlan=(queue:any[],manualBookings:any[])=>{
     const ranked=[
       ["19:00","18:00","20:00","15:00","16:00","14:00","17:00","21:00","12:00","11:00"],
       ["19:00","15:00","17:00","16:00","18:00","14:00","13:00","20:00","21:00","12:00"],
@@ -246,21 +246,35 @@ export function Scheduler() {
       ["21:00","22:00","20:00","17:00","18:00","19:00","15:00","12:00","14:00","16:00"],
       ["21:00","22:00","20:00","19:00","18:00","17:00","15:00","14:00","12:00","11:00"]
     ];
-    const now=new Date(),slots:string[]=[];
-    for(let offset=0;offset<366&&slots.length<queueCount;offset++){
+    const mixes:Record<number,{posts:number;reels:number}>={
+      1:{posts:0,reels:1},2:{posts:1,reels:1},3:{posts:2,reels:1},4:{posts:3,reels:1},
+      5:{posts:3,reels:2},6:{posts:4,reels:2},7:{posts:5,reels:2},8:{posts:6,reels:2},
+      9:{posts:6,reels:3},10:{posts:6,reels:4}
+    };
+    const isReel=(i:any)=>String(i.publish_format||"").toLowerCase()==="reel";
+    const reels=queue.filter(isReel),photos=queue.filter((i:any)=>!isReel(i));
+    const plan:any[]=[],now=new Date();let reelIndex=0,photoIndex=0;
+    for(let offset=0;offset<366&&plan.length<queue.length;offset++){
       const dayDate=new Date(now.getFullYear(),now.getMonth(),now.getDate()+offset);
       const date=dayDate.getFullYear()+"-"+String(dayDate.getMonth()+1).padStart(2,"0")+"-"+String(dayDate.getDate()).padStart(2,"0");
       const booked=manualBookings.filter(i=>{const d=new Date(i.scheduled_at);return d.getFullYear()===dayDate.getFullYear()&&d.getMonth()===dayDate.getMonth()&&d.getDate()===dayDate.getDate()});
       const used=new Set(booked.map(i=>{const d=new Date(i.scheduled_at);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}));
-      const remaining=Math.max(0,postsPerDay-booked.length);
-      if(!remaining)continue;
+      const remaining=Math.max(0,postsPerDay-booked.length);if(!remaining)continue;
       const available=ranked[dayDate.getDay()].filter(t=>{const candidate=new Date(date+"T"+t+":00");return candidate.getTime()>now.getTime()+60000&&!used.has(t)}).sort();
-      const count=Math.min(remaining,available.length);
+      const count=Math.min(remaining,available.length,queue.length-plan.length);if(!count)continue;
+      const target=mixes[postsPerDay]||{posts:Math.ceil(postsPerDay*.6),reels:Math.floor(postsPerDay*.4)};
+      const takeReels=Math.min(target.reels,count),takePhotos=Math.min(target.posts,count-takeReels);
+      let daily:any[]=[];
+      for(let n=0;n<takeReels&&reelIndex<reels.length;n++)daily.push(reels[reelIndex++]);
+      for(let n=0;n<takePhotos&&photoIndex<photos.length;n++)daily.push(photos[photoIndex++]);
+      // If either media pool is short, fill the day's remaining slots from the other pool.
+      while(daily.length<count&&reelIndex<reels.length)daily.push(reels[reelIndex++]);
+      while(daily.length<count&&photoIndex<photos.length)daily.push(photos[photoIndex++]);
+      if(!daily.length)break;
       const spread=count===1?[available[Math.floor((available.length-1)/2)]]:Array.from({length:count},(_,n)=>available[Math.round(n*(available.length-1)/Math.max(1,count-1))]);
-      const candidates=spread.filter(Boolean);
-      for(const time of candidates){slots.push(new Date(date+"T"+time+":00").toISOString());if(slots.length>=queueCount)break;}
+      for(let n=0;n<daily.length;n++){const time=spread[n];if(!time)continue;plan.push({assignment:daily[n],scheduled_at:new Date(date+"T"+time+":00").toISOString()});if(plan.length>=queue.length)break;}
     }
-    return slots;
+    return plan;
   };
   const toggleAuto=async()=>{
     if(autoBusy)return;
@@ -269,11 +283,11 @@ export function Scheduler() {
       if(!autoPost){
         const queue=items.filter(i=>i.approval_status==="approved"&&(!i.scheduled_at||i.auto_scheduled)&&!["published","rejected","failed","needs_review"].includes(i.status)).sort((a,b)=>new Date(b.created_at).getTime()-new Date(a.created_at).getTime());
         const manualBookings=items.filter(i=>i.scheduled_at&&!i.auto_scheduled);
-        const slots=buildAutoSlots(queue.length,manualBookings);
-        if(slots.length<queue.length)throw new Error("Could not find enough future posting slots for every approved post.");
+        const plan=buildAutoPlan(queue,manualBookings);
+        if(plan.length<queue.length)throw new Error("Could not find enough future posting slots for every approved post.");
         const oldAuto=items.filter(i=>i.scheduled_at&&i.auto_scheduled&&i.approval_status==="approved");
         for(const item of oldAuto)await api("/assignments/"+item.id,{method:"PATCH",body:JSON.stringify({scheduled_at:null})});
-        if(queue.length){for(let start=0;start<queue.length;start+=5){const batch=queue.slice(start,start+5),batchSlots=slots.slice(start,start+5);await api("/scheduler/auto-fill",{method:"POST",body:JSON.stringify({assignment_ids:batch.map(i=>i.id),scheduled_at:batchSlots})});}}
+        if(plan.length){for(let start=0;start<plan.length;start+=5){const batch=plan.slice(start,start+5);await api("/scheduler/auto-fill",{method:"POST",body:JSON.stringify({assignment_ids:batch.map((p:any)=>p.assignment.id),scheduled_at:batch.map((p:any)=>p.scheduled_at)})});}}
         await api("/settings",{method:"PATCH",body:JSON.stringify({auto_post_enabled:true,posts_per_day:postsPerDay})});
         setAutoPost(true);await load();
       }else{
