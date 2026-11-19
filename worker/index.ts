@@ -1495,6 +1495,22 @@ async function route(req: Request, env: Env, ctx: Ctx, url: URL): Promise<Respon
     for(const meme of batch){try{const caption=await generateCaptionWithGroq(env,ctx,meme);await db(env,"memes",`?id=eq.${meme.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({social_caption:caption})});generated++;}catch(e:any){failed.push(String(e?.message||"Caption generation failed.").slice(0,180));}}
     return json({generated,remaining:Math.max(0,missing.length-batch.length),failed,attempted:batch.length});
   }
+  // One-off backfill: runs the AI watermark pass over saved memes that are not rendered yet.
+  // Works in batches of 5 from an offset, so each call stays small; the caller loops until done.
+  if(p==="/memes/watermark-cleanup"&&method==="POST"){
+    const offset=Math.max(0,Math.floor(Number(body.offset)||0));
+    const rows=await db(env,"memes",`?${userFilter(ctx)}&reel_asset_url=is.null&extracted_text=not.is.null&select=id,extracted_text,source_username&order=created_at.asc,id.asc&limit=2000`);
+    const batch=rows.slice(offset,offset+5);let cleaned=0;const failed:string[]=[];
+    for(const m of batch){
+      try{
+        const text=await removeWatermarkWithGroq(env,ctx,String(m.extracted_text),m.source_username);
+        if(!text){failed.push(`Meme ${m.id}: the check removed all text; kept the original.`);continue;}
+        if(text!==m.extracted_text){await db(env,"memes",`?id=eq.${m.id}&${userFilter(ctx)}`,{method:"PATCH",body:JSON.stringify({extracted_text:text})});cleaned++;}
+      }catch(e:any){failed.push(`Meme ${m.id}: ${String(e?.message||"watermark check failed.").slice(0,160)}`);}
+    }
+    const next=offset+batch.length;
+    return json({cleaned,attempted:batch.length,total:rows.length,next_offset:next,done:next>=rows.length,failed});
+  }
   const memeCaptionEdit=p.match(/^\/memes\/([0-9a-f-]+)\/caption$/);
   if(memeCaptionEdit&&method==="PATCH"){
     const memeId=memeCaptionEdit[1];if(!await owned(env,"memes",memeId,ctx))return fail("Meme not found.",404);
