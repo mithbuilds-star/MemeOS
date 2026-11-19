@@ -874,7 +874,15 @@ async function runNextPendingPage(env:Env){
   }
   // Store the fetched posts on the job; runNextPendingPage imports QUEUE_BATCH of them on each scheduler tick.
   try{
-    const queued={...job,metadata:{...metadata,queue:items,queue_offset:0,queue_remaining:items.length}};
+    // Drop posts that the older-than window will reject, so ticks only spend time on posts that can be saved.
+    // Posts without a timestamp are kept, because the import step handles them.
+    const olderMs=olderThan?Date.parse(olderThan):null;
+    const kept=items.filter((item:any)=>{
+      if(olderMs==null)return true;
+      const t=normalizeApifyItem(item).postedAt;
+      return !t||Date.parse(t)<olderMs;
+    });
+    const queued={...job,metadata:{...metadata,queue:kept,queue_offset:0,queue_remaining:kept.length}};
     await db(env,"jobs",`?id=eq.${job.id}`,{method:"PATCH",body:JSON.stringify({metadata:queued.metadata})});
     await importQueueTick(env,queued);
   }catch(error:any){
